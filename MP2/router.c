@@ -51,36 +51,85 @@ int create_tcp_connection(char *hostname,
 	return sockfd;
 }
 
+void send_msg_to_manager(int sockfd,
+			 char *msg,
+			 int count)
+{
+	if (send(sockfd,
+		 msg,
+		 count,
+		 0) < count) {
+		printf("Error: msg sending error to manager\n");
+		exit(1);
+	}
+}
+
+int recv_msg_from_manager(int sockfd,
+			  char *msg)
+{
+	int ret;
+#define MAX_MSG_LEN 100
+	if ((ret = recv(sockfd,
+			msg,
+			MAX_MSG_LEN,
+			0)) == -1) {
+		printf("Error: HELO reply error\n");
+		exit(1);
+	}
+
+	msg[ret-1] = '\0';
+	return ret;
+}
+
 void get_addr_from_manager(int sockfd,
 			   char *myaddr)
 {
 #define ADDR_STR_LEN 25
 	char msg[] = "HELO\n";
-	char addr[ADDR_STR_LEN];
-	int count;
+	char addr[MAX_MSG_LEN];
 
-	count = strlen(msg);
+	send_msg_to_manager(sockfd,
+			    msg,
+			    strlen(msg));
 
-	if (send(sockfd,
-		 msg,
-		 count,
-		 0) < count) {
-		printf("Error: HELO write failed\n");
-		exit(1);
-	}
+	recv_msg_from_manager(sockfd,
+			      addr);
 
-	if ((count = recv(sockfd,
-			  addr,
-			  ADDR_STR_LEN,
-			  0)) == -1) {
-		printf("Error: HELO reply error\n");
-		exit(1);
-	}
-
-	addr[count-1] = '\0';
 	strcpy(myaddr,
 	       &addr[5]);
+
 	printf("Received string:%s\n",addr);
+}
+
+int send_udp_details_to_manager(int sockfd,
+				char *hostname,
+				char *udpport)
+{
+	char msg[25];
+	char resp[MAX_MSG_LEN];
+
+	sprintf(msg, "HOST %s %s\n",hostname, udpport);
+
+	send_msg_to_manager(sockfd, msg, strlen(msg));
+
+	recv_msg_from_manager(sockfd, resp);
+
+	return (strcmp(resp,
+		       "OK") == 0);
+}
+
+void get_neigh_details_from_manager(int sockfd)
+{
+	char msg[] = "NEIGH?\n";
+	char resp[MAX_MSG_LEN];
+
+	send_msg_to_manager(sockfd, msg, strlen(msg));
+
+	do {
+		memset(resp, 0, MAX_MSG_LEN);
+		recv_msg_from_manager(sockfd, resp);
+		printf("received msg:%s\n",resp);
+	} while(strcmp(resp, "DONE"));
 }
 
 int main(int argc, char **argv)
@@ -103,7 +152,16 @@ int main(int argc, char **argv)
 
 	/* Get self address from manager */
 	get_addr_from_manager(sockfd,myaddr);
-	printf("%s\n",myaddr);
+
+	/* Send self details to manager */
+	if (!send_udp_details_to_manager(sockfd,
+					 argv[1],
+					 argv[3])) {
+		printf("Error from manager\n");
+		exit(1);
+	}
+
+	get_neigh_details_from_manager(sockfd);
 
 	close(sockfd);
 }
