@@ -12,7 +12,6 @@ typedef struct _dll_t {
 	unsigned int size;
         dll_entry_t *head,*tail;
 }dll_t;
- 
 
 void dll_init(dll_t *l);
 void dll_destroy(dll_t *l);
