@@ -5,12 +5,16 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 
-#define HELO_MSG  "HELO\n"
-#define READY_MSG "READY\n"
-#define NEIGH_MSG "NEIGH?\n"
+#include "dll.h"
+#include "error.h"
+#include "router.h"
 
-typedef unsigned char bool;
+dll_t node_list;
+char myaddr[MAX_ADDR_LEN];
+int manager_sockfd;
+int udp_sockfd;
 
 int create_tcp_connection(char *hostname,
 			  char *port)
@@ -28,7 +32,7 @@ int create_tcp_connection(char *hostname,
 			&hints,
 			&servinfo) != 0) {
 		perror("getaddrinfo");
-		exit(1);
+		exit(SOCK_ERROR);
 	}
 
 	for (p = servinfo; p != NULL; p = p->ai_next) {
@@ -57,129 +61,232 @@ int create_tcp_connection(char *hostname,
 	return sockfd;
 }
 
-void send_msg_to_manager(int sockfd,
-			 char *msg)
+void send_msg_to_manager(char *msg)
 {
 	int count = strlen(msg);
-	if (send(sockfd,
+	if (send(manager_sockfd,
 		 msg,
 		 count,
 		 0) < count) {
-		printf("Error: msg sending error to manager\n");
-		exit(1);
+		exit(SOCK_ERROR);
 	}
 }
 
-bool recv_msg_from_manager(int sockfd,
-			   char *msg)
+int recv_msg_from_manager(char *msg)
 {
 	int ret;
 #define MAX_MSG_LEN 100
-	if ((ret = recv(sockfd,
+	if ((ret = recv(manager_sockfd,
 			msg,
 			MAX_MSG_LEN,
 			0)) == -1) {
-		printf("Error: HELO reply error\n");
-		exit(1);
+		exit(SOCK_ERROR);
 	}
 
 	msg[ret-1] = '\0';
 	return ret;
 }
 
-void get_addr_from_manager(int sockfd,
-			   char *myaddr)
+void get_addr_from_manager()
 {
 #define ADDR_STR_LEN 25
 	char addr[MAX_MSG_LEN];
 
-	send_msg_to_manager(sockfd,
-			    HELO_MSG);
+	send_msg_to_manager(HELO_MSG);
 
-	recv_msg_from_manager(sockfd,
-			      addr);
+	recv_msg_from_manager(addr);
 
 	strcpy(myaddr,
 	       &addr[5]);
 
-	printf("Received string:%s\n",addr);
+	printf("My address is:%s\n",myaddr);
 }
 
-bool send_udp_details_to_manager(int sockfd,
-				char *hostname,
+bool send_udp_details_to_manager(char *hostname,
 				char *udpport)
 {
 	char msg[25];
 	char resp[MAX_MSG_LEN];
 
-	sprintf(msg, "HOST %s %s\n",hostname, udpport);
+	sprintf(msg, HOST_MSG "%s %s\n",hostname, udpport);
 
-	send_msg_to_manager(sockfd, msg);
+	send_msg_to_manager(msg);
 
-	recv_msg_from_manager(sockfd, resp);
+	recv_msg_from_manager(resp);
 
 	return (strcmp(resp,
-		       "OK") == 0);
+		       OK_MSG) == 0);
 }
 
-int get_neigh_details_from_manager(int sockfd)
+void add_new_node(char *str)
+{
+	char *ptr;
+	struct node *tmp = malloc(sizeof(*tmp));
+
+	if (tmp == NULL) {
+		exit(MEM_ALLOC_ERROR);
+	}
+
+	str += 6;
+
+	/* Extract address */
+	ptr = strtok(str, " ");
+	strcpy(tmp->addr,
+	       ptr);
+
+	/* Extract hostname */
+	ptr = strtok(NULL, " ");
+	strcpy(tmp->hostname,
+	       ptr);
+
+	/* Extract udp port */
+	ptr = strtok(NULL, " ");
+	tmp->udp_port = atoi(ptr);
+
+	/* Extract cost */
+	ptr = strtok(NULL, " ");
+	tmp->cost = atoi(ptr);
+
+	/* Add the node to tail of the list */
+	dll_add_to_tail(&node_list, tmp);
+}
+
+bool get_neigh_details_from_manager()
 {
 	char resp[MAX_MSG_LEN];
 	char *ptr;
 
-	send_msg_to_manager(sockfd, NEIGH_MSG);
+	send_msg_to_manager(NEIGH_MSG);
 
 	do {
 		memset(resp, 0, MAX_MSG_LEN);
-		recv_msg_from_manager(sockfd, resp);
+		recv_msg_from_manager(resp);
 		ptr = strchr(resp, '\n');
 		if (ptr) {
 			*ptr = '\0';
 			ptr++;
 		}
-		printf("received msg:%s\n",resp);
+		printf("%s\n",resp);
+		add_new_node(resp);
 	} while((ptr == NULL) || strcmp(ptr, "DONE"));
 
-	send_msg_to_manager(sockfd, READY_MSG);
-	recv_msg_from_manager(sockfd, resp);
+	send_msg_to_manager(READY_MSG);
+	recv_msg_from_manager(resp);
 	return (strcmp(resp,
-		       "OK") == 0);
+		       OK_MSG) == 0);
+}
+
+void print_node_list()
+{
+	int i;
+	struct node *tmp;
+	int size = dll_size(&node_list);
+
+
+	printf(" Addr  Hostname   Port  Cost\n");
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&node_list, i);
+		printf("%5s ",tmp->addr);
+		printf("%10s ",tmp->hostname);
+		printf("%5u ",tmp->udp_port);
+		printf("%5d\n",tmp->cost);
+	}
+}
+
+void update_cost_for_node(char *ptr,
+			  int cost)
+{
+	int i;
+	struct node *tmp;
+	int size = dll_size(&node_list);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&node_list, i);
+		if (!strcmp(tmp->addr, ptr)) {
+			tmp->cost = cost;
+			break;
+		}
+	}
+}
+
+void update_cost_of_link(char *msg)
+{
+	char *node1, *node2, *ptr;
+	int cost;
+	char resp[MAX_MSG_LEN];
+
+	node1 = strtok(msg + strlen(LINK_COST_MSG) + 1, " ");
+	node2 = strtok(NULL, " ");
+	cost  = atoi(strtok(NULL, " "));
+
+	ptr = strcmp(node1,myaddr)?node1:node2;
+	printf("Update:%s %s %d\n",node1,node2,cost);
+
+	update_cost_for_node(ptr, cost);
+	print_node_list();
+
+	sprintf(resp, "COST %d OK\n", cost);
+	send_msg_to_manager(resp);
+}
+
+void listen_for_events()
+{
+	char msg[MAX_MSG_LEN];
+	do {
+		recv_msg_from_manager(msg);
+
+		if (!strncmp(msg,
+			     LINK_COST_MSG,
+			     strlen(LINK_COST_MSG))) {
+			update_cost_of_link(msg);
+		} else if (!strcmp(msg,
+				   END_MSG)) {
+			printf("END\n");
+			send_msg_to_manager(BYE_MSG);
+			break;
+		}
+	} while(1);
 }
 
 int main(int argc, char **argv)
 {
-	int sockfd;
-	char myaddr[10];
-
 	if (argc != 4) {
 		printf("Usage: %s <manager hostname> <TCP port of manager> <UDP port of router>\n",argv[0]);
-		exit(1);
+		exit(USAGE_ERROR);
 	}
 
 	/* Create a TCP connection with the manager */
-	sockfd = create_tcp_connection(argv[1],
+	manager_sockfd = create_tcp_connection(argv[1],
 				       argv[2]);
 
-	if (sockfd == -1) {
-		exit(1);
+	if (manager_sockfd == -1) {
+		exit(TCP_CONNECTION_ERROR);
 	}
 
 	/* Get self address from manager */
-	get_addr_from_manager(sockfd,myaddr);
+	get_addr_from_manager();
 
 	/* Send self details to manager */
-	if (!send_udp_details_to_manager(sockfd,
-					 argv[1],
+	if (!send_udp_details_to_manager(argv[1],
 					 argv[3])) {
-		printf("Error from manager in step 1\n");
-		exit(1);
+		exit(MANAGER_ERROR);
 	}
 
-	if (!get_neigh_details_from_manager(sockfd)) {
-		printf("Error from manager in step 2\n");
-		exit(1);
+	/* Initialize head of the list */
+	dll_init(&node_list);
+
+	/* Get neighbour details */
+	if (!get_neigh_details_from_manager()) {
+		exit(MANAGER_ERROR);
 	}
+
+	/* Print node list */
+	print_node_list();
+
+	/* Listen for incoming messages / events */
+	listen_for_events();
 
 	printf("success\n");
-	close(sockfd);
+	close(manager_sockfd);
+	return 0;
 }
