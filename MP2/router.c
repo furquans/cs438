@@ -12,7 +12,7 @@
 #include "router.h"
 
 dll_t node_list;
-char myaddr[MAX_ADDR_LEN];
+int myaddr;
 int manager_sockfd;
 int udp_sockfd;
 bool logging_enabled;
@@ -119,6 +119,31 @@ void send_msg_to_manager(char *msg)
 	}
 }
 
+void send_msg_to_router(char *msg, struct node *router)
+{
+	struct sockaddr_in their_addr;
+	struct hostent *he;
+	int count = strlen(msg);
+
+	if ((he=gethostbyname(router->hostname)) == NULL) {
+		exit(SOCK_ERROR);
+	}
+
+	their_addr.sin_family = AF_INET;
+	their_addr.sin_port = htons(router->udp_port);
+	their_addr.sin_addr = *((struct in_addr *)he->h_addr);
+	memset(their_addr.sin_zero, '\0', sizeof(their_addr.sin_zero));
+
+	if (sendto(udp_sockfd,
+		   msg,
+		   count,
+		   0,
+		   (struct sockaddr*)&their_addr,
+		   sizeof(their_addr)) < count) {
+		exit(SOCK_ERROR);
+	}
+}
+
 int recv_msg(int sockfd,
 	     char *msg,
 	     int len)
@@ -151,6 +176,17 @@ int recv_msg_from_router(char *msg)
 			MAX_RTR_MSG_LEN);
 }
 
+bool send_msg_and_chk_ok(char *msg)
+{
+	char resp[MAX_MGR_MSG_LEN];
+	send_msg_to_manager(msg);
+
+	recv_msg_from_manager(resp);
+
+	return (strcmp(resp,
+		       OK_MSG) == 0);
+}
+
 void get_addr_from_manager()
 {
 #define ADDR_STR_LEN 25
@@ -160,26 +196,18 @@ void get_addr_from_manager()
 
 	recv_msg_from_manager(addr);
 
-	strcpy(myaddr,
-	       &addr[5]);
-
-	printf("My address is:%s\n",myaddr);
+	myaddr = atoi(addr+5);
+	printf("My address is:%d\n",myaddr);
 }
 
 bool send_udp_details_to_manager(char *hostname,
 				char *udpport)
 {
 	char msg[25];
-	char resp[MAX_MGR_MSG_LEN];
 
 	sprintf(msg, HOST_MSG "%s %s\n",hostname, udpport);
 
-	send_msg_to_manager(msg);
-
-	recv_msg_from_manager(resp);
-
-	return (strcmp(resp,
-		       OK_MSG) == 0);
+	return send_msg_and_chk_ok(msg);
 }
 
 void add_new_node(char *str)
@@ -195,8 +223,7 @@ void add_new_node(char *str)
 
 	/* Extract address */
 	ptr = strtok(str, " ");
-	strcpy(tmp->addr,
-	       ptr);
+	tmp->addr = atoi(ptr);
 
 	/* Extract hostname */
 	ptr = strtok(NULL, " ");
@@ -234,23 +261,36 @@ bool get_neigh_details_from_manager()
 		add_new_node(resp);
 	} while((ptr == NULL) || strcmp(ptr, "DONE"));
 
-	send_msg_to_manager(READY_MSG);
-	recv_msg_from_manager(resp);
-	return (strcmp(resp,
-		       OK_MSG) == 0);
+	return send_msg_and_chk_ok(READY_MSG);
 }
 
 void enable_logging()
 {
 	char resp[MAX_MGR_MSG_LEN];
 
-	send_msg_to_manager(LOG_MSG "\n");
+	send_msg_to_manager(LOG_ON_MSG "\n");
 
 	recv_msg_from_manager(resp);
 
 	if (!strcmp(resp,
-		    LOG_MSG)) {
+		    LOG_ON_MSG)) {
 		printf("Logging on\n");
+		logging_enabled = 1;
+	}
+}
+
+void disable_logging()
+{
+	char resp[MAX_MGR_MSG_LEN];
+
+	send_msg_to_manager(LOG_OFF_MSG "\n");
+
+	recv_msg_from_manager(resp);
+
+	if (!strcmp(resp,
+		    LOG_OFF_MSG)) {
+		printf("Logging off\n");
+		logging_enabled = 0;
 	}
 }
 
@@ -264,14 +304,14 @@ void print_node_list()
 	printf(" Addr  Hostname   Port  Cost\n");
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&node_list, i);
-		printf("%5s ",tmp->addr);
+		printf("%5d ",tmp->addr);
 		printf("%10s ",tmp->hostname);
 		printf("%5u ",tmp->udp_port);
 		printf("%5d\n",tmp->cost);
 	}
 }
 
-void update_cost_for_node(char *ptr,
+void update_cost_for_node(int node,
 			  int cost)
 {
 	int i;
@@ -280,7 +320,7 @@ void update_cost_for_node(char *ptr,
 
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&node_list, i);
-		if (!strcmp(tmp->addr, ptr)) {
+		if (tmp->addr == node) {
 			tmp->cost = cost;
 			break;
 		}
@@ -289,18 +329,18 @@ void update_cost_for_node(char *ptr,
 
 void update_cost_of_link(char *msg)
 {
-	char *node1, *node2, *ptr;
+	int node1, node2, node;
 	int cost;
 	char resp[MAX_MGR_MSG_LEN];
 
-	node1 = strtok(msg + strlen(LINK_COST_MSG) + 1, " ");
-	node2 = strtok(NULL, " ");
+	node1 = atoi(strtok(msg + strlen(LINK_COST_MSG) + 1, " "));
+	node2 = atoi(strtok(NULL, " "));
 	cost  = atoi(strtok(NULL, " "));
 
-	ptr = strcmp(node1,myaddr)?node1:node2;
-	printf("Update:%s %s %d\n",node1,node2,cost);
+	node = (node1==myaddr)?node1:node2;
+	printf("Update:%d %d %d\n",node1,node2,cost);
 
-	update_cost_for_node(ptr, cost);
+	update_cost_for_node(node, cost);
 	print_node_list();
 
 	sprintf(resp, "COST %d OK\n", cost);
@@ -328,21 +368,79 @@ int handle_manager_event()
 	return ret_val;
 }
 
-void handle_router_event()
+struct node *find_dest_entry(int dest)
+{
+	int i;
+        struct node *tmp;
+	int size = dll_size(&node_list);
+
+	for (i=0;i<size;i++) {
+                tmp = dll_at(&node_list, i);
+		if (tmp->addr == dest) {
+			return tmp;
+		}
+	}
+	return NULL;
+}
+
+void format_and_send_data(int dest,
+			  char *in)
 {
 	char msg[MAX_RTR_MSG_LEN];
-	char dest[3];
+	char log[MAX_MGR_MSG_LEN];
+	struct node *router;
+
+	msg[0] = 2;
+	msg[1] = in[1];
+	msg[2] = in[2];
+	msg[3] = (myaddr >> 8) & 0x0ff;
+	msg[4] = myaddr & 0x0ff;
+	strcpy(msg+5,
+	       in+3);
+
+	if (logging_enabled == 0) {
+		enable_logging();
+	}
+
+	router = find_dest_entry(dest);
+
+	sprintf(log, LOG_FWD_MSG "%d %s\n", router->addr, in+3);
+
+	send_msg_and_chk_ok(log);
+
+	send_msg_to_router(msg,
+			   router);
+}
+
+void handle_router_event()
+{
+	char log[MAX_MGR_MSG_LEN];
+	char msg[MAX_RTR_MSG_LEN];
+	int destaddr;
+
+	if (logging_enabled == 0) {
+		enable_logging();
+	}
 
 	recv_msg_from_router(msg);
 
-	if (msg[0]  == '1') {
+	if (msg[0]  == 1) {
 		printf("Type 1 message\n");
+		destaddr = (msg[1] << 8) + msg[2];
+		printf("Destination = %d\n", destaddr);
+		printf("msg:%s\n",msg+3);
+		format_and_send_data(destaddr,
+				     msg);
+	} else if (msg[0] == 2) {
+		printf("Type 2 message\n");
+		destaddr = (msg[1] << 8) + msg[2];
+		printf("Destination = %d\n", destaddr);
+		printf("Souce = %d\n", (msg[3] << 8) + msg[4]);
+		printf("msg = %s\n",msg+5);
+
+		sprintf(log, RECV_MSG "%s\n",msg+5);
+		send_msg_and_chk_ok(log);
 	}
-	dest[0] = msg[1];
-	dest[1] = msg[2];
-	dest[2] = '\0';
-	printf("Destination = %s\n", dest);
-	printf("msg:%s\n",msg);
 }
 
 void listen_for_events()
