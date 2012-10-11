@@ -58,6 +58,52 @@ int create_tcp_connection(char *hostname,
 		sockfd = -1;
 	}
 
+	freeaddrinfo(servinfo);
+
+	return sockfd;
+}
+
+int create_udp_socket(char *port)
+{
+	int sockfd;
+	struct addrinfo hints, *servinfo, *p;
+
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_PASSIVE;
+
+	if (getaddrinfo(NULL,
+			port,
+			&hints,
+			&servinfo) != 0) {
+		perror("getaddrinfo");
+		exit(SOCK_ERROR);
+	}
+
+	for(p = servinfo; p != NULL; p = p->ai_next) {
+		if ((sockfd = socket(p->ai_family, p->ai_socktype,
+				     p->ai_protocol)) == -1) {
+			perror("socket");
+			continue;
+		}
+
+		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("bind");
+			continue;
+		}
+
+		break;
+	}
+
+	if (p == NULL) {
+		printf("Failed to bind\n");
+		sockfd = -1;
+	}
+
+	freeaddrinfo(servinfo);
+
 	return sockfd;
 }
 
@@ -229,23 +275,67 @@ void update_cost_of_link(char *msg)
 	send_msg_to_manager(resp);
 }
 
+int handle_manager_event()
+{
+	int ret_val = 0;
+	char msg[MAX_MSG_LEN];
+
+	recv_msg_from_manager(msg);
+
+	if (!strncmp(msg,
+		     LINK_COST_MSG,
+		     strlen(LINK_COST_MSG))) {
+		update_cost_of_link(msg);
+	} else if (!strcmp(msg,
+			   END_MSG)) {
+		printf("END\n");
+		send_msg_to_manager(BYE_MSG);
+		ret_val = -1;
+	}
+
+	return ret_val;
+}
+
+void handle_router_event()
+{
+}
+
 void listen_for_events()
 {
-	char msg[MAX_MSG_LEN];
-	do {
-		recv_msg_from_manager(msg);
+	int result, max_fd;
+	fd_set readset;
 
-		if (!strncmp(msg,
-			     LINK_COST_MSG,
-			     strlen(LINK_COST_MSG))) {
-			update_cost_of_link(msg);
-		} else if (!strcmp(msg,
-				   END_MSG)) {
-			printf("END\n");
-			send_msg_to_manager(BYE_MSG);
-			break;
+	do {
+
+		do {
+			FD_ZERO(&readset);
+			FD_SET(manager_sockfd, &readset);
+			FD_SET(udp_sockfd, &readset);
+			max_fd = udp_sockfd > manager_sockfd ? udp_sockfd : manager_sockfd;
+			result = select(max_fd+1, &readset, NULL, NULL, NULL);
+		} while (result == -1);
+
+		if (result > 0) {
+			if (FD_ISSET(manager_sockfd, &readset)) {
+				/* Some data on manager socket */
+				if (handle_manager_event() == -1) {
+					break;
+				}
+			} else if (FD_ISSET(udp_sockfd, &readset)) {
+				/* Some data on UDP port */
+				handle_router_event();
+			}
 		}
 	} while(1);
+}
+
+void cleanup()
+{
+	struct node *tmp;
+	while ((tmp = dll_remove_from_head(&node_list))) {
+		free(tmp);
+	}
+	dll_destroy(&node_list);
 }
 
 int main(int argc, char **argv)
@@ -265,6 +355,9 @@ int main(int argc, char **argv)
 
 	/* Get self address from manager */
 	get_addr_from_manager();
+
+	/* Create a udp socket to listen on */
+	udp_sockfd = create_udp_socket(argv[3]);
 
 	/* Send self details to manager */
 	if (!send_udp_details_to_manager(argv[1],
@@ -288,5 +381,10 @@ int main(int argc, char **argv)
 
 	printf("success\n");
 	close(manager_sockfd);
+	close(udp_sockfd);
+
+	/* Cleanup */
+	cleanup();
+
 	return 0;
 }
