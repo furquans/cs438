@@ -9,11 +9,14 @@
 #define BYE_MSG "BYE\n"
 #define END_MSG "END"
 #define OK_MSG "OK"
+#define LOG_MSG "LOG_ON"
 
 typedef unsigned char bool;
 
 #define MAX_ADDR_LEN 10
 #define MAX_HOSTNAME_LEN 20
+#define MAX_MGR_MSG_LEN 100
+#define MAX_RTR_MSG_LEN 65535
 
 struct node {
 	char addr[MAX_ADDR_LEN];

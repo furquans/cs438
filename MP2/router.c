@@ -15,6 +15,7 @@ dll_t node_list;
 char myaddr[MAX_ADDR_LEN];
 int manager_sockfd;
 int udp_sockfd;
+bool logging_enabled;
 
 int create_tcp_connection(char *hostname,
 			  char *port)
@@ -118,25 +119,42 @@ void send_msg_to_manager(char *msg)
 	}
 }
 
-int recv_msg_from_manager(char *msg)
+int recv_msg(int sockfd,
+	     char *msg,
+	     int len)
 {
 	int ret;
-#define MAX_MSG_LEN 100
-	if ((ret = recv(manager_sockfd,
-			msg,
-			MAX_MSG_LEN,
-			0)) == -1) {
+	if ((ret = recvfrom(sockfd,
+			     msg,
+			     len,
+			     0,
+			     NULL,
+			     NULL)) < 0) {
 		exit(SOCK_ERROR);
 	}
+	return ret;
+}
 
+int recv_msg_from_manager(char *msg)
+{
+	int ret = recv_msg(manager_sockfd,
+			   msg,
+			   MAX_MGR_MSG_LEN);
 	msg[ret-1] = '\0';
 	return ret;
+}
+
+int recv_msg_from_router(char *msg)
+{
+	return recv_msg(udp_sockfd,
+			msg,
+			MAX_RTR_MSG_LEN);
 }
 
 void get_addr_from_manager()
 {
 #define ADDR_STR_LEN 25
-	char addr[MAX_MSG_LEN];
+	char addr[MAX_MGR_MSG_LEN];
 
 	send_msg_to_manager(HELO_MSG);
 
@@ -152,7 +170,7 @@ bool send_udp_details_to_manager(char *hostname,
 				char *udpport)
 {
 	char msg[25];
-	char resp[MAX_MSG_LEN];
+	char resp[MAX_MGR_MSG_LEN];
 
 	sprintf(msg, HOST_MSG "%s %s\n",hostname, udpport);
 
@@ -199,13 +217,13 @@ void add_new_node(char *str)
 
 bool get_neigh_details_from_manager()
 {
-	char resp[MAX_MSG_LEN];
+	char resp[MAX_MGR_MSG_LEN];
 	char *ptr;
 
 	send_msg_to_manager(NEIGH_MSG);
 
 	do {
-		memset(resp, 0, MAX_MSG_LEN);
+		memset(resp, 0, MAX_MGR_MSG_LEN);
 		recv_msg_from_manager(resp);
 		ptr = strchr(resp, '\n');
 		if (ptr) {
@@ -220,6 +238,20 @@ bool get_neigh_details_from_manager()
 	recv_msg_from_manager(resp);
 	return (strcmp(resp,
 		       OK_MSG) == 0);
+}
+
+void enable_logging()
+{
+	char resp[MAX_MGR_MSG_LEN];
+
+	send_msg_to_manager(LOG_MSG "\n");
+
+	recv_msg_from_manager(resp);
+
+	if (!strcmp(resp,
+		    LOG_MSG)) {
+		printf("Logging on\n");
+	}
 }
 
 void print_node_list()
@@ -259,7 +291,7 @@ void update_cost_of_link(char *msg)
 {
 	char *node1, *node2, *ptr;
 	int cost;
-	char resp[MAX_MSG_LEN];
+	char resp[MAX_MGR_MSG_LEN];
 
 	node1 = strtok(msg + strlen(LINK_COST_MSG) + 1, " ");
 	node2 = strtok(NULL, " ");
@@ -278,7 +310,7 @@ void update_cost_of_link(char *msg)
 int handle_manager_event()
 {
 	int ret_val = 0;
-	char msg[MAX_MSG_LEN];
+	char msg[MAX_MGR_MSG_LEN];
 
 	recv_msg_from_manager(msg);
 
@@ -298,6 +330,19 @@ int handle_manager_event()
 
 void handle_router_event()
 {
+	char msg[MAX_RTR_MSG_LEN];
+	char dest[3];
+
+	recv_msg_from_router(msg);
+
+	if (msg[0]  == '1') {
+		printf("Type 1 message\n");
+	}
+	dest[0] = msg[1];
+	dest[1] = msg[2];
+	dest[2] = '\0';
+	printf("Destination = %s\n", dest);
+	printf("msg:%s\n",msg);
 }
 
 void listen_for_events()
