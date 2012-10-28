@@ -11,7 +11,8 @@
 #include "error.h"
 #include "router.h"
 
-dll_t node_list;
+dll_t neigh_list;
+dll_t forward_table;
 int myaddr;
 int manager_sockfd;
 int udp_sockfd;
@@ -171,9 +172,11 @@ int recv_msg_from_manager(char *msg)
 
 int recv_msg_from_router(char *msg)
 {
-	return recv_msg(udp_sockfd,
-			msg,
-			MAX_RTR_MSG_LEN);
+	int ret = recv_msg(udp_sockfd,
+			   msg,
+			   MAX_RTR_MSG_LEN);
+	msg[ret] = '\0';
+	return ret;
 }
 
 bool send_msg_and_chk_ok(char *msg)
@@ -210,6 +213,32 @@ bool send_udp_details_to_manager(char *hostname,
 	return send_msg_and_chk_ok(msg);
 }
 
+void add_node_to_fwd_table(int addr,
+			   int cost,
+			   int next_hop)
+{
+	int i;
+	struct forward_table_entry *tmp;
+	int size = dll_size(&forward_table);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&forward_table, i);
+		if (tmp->addr == addr) {
+			if (tmp->cost > cost) {
+				tmp->cost = cost;
+				tmp->next_hop = next_hop;
+			}
+			return;
+		}
+	}
+
+	tmp = malloc(sizeof(*tmp));
+	tmp->addr = addr;
+	tmp->cost = cost;
+	tmp->next_hop = next_hop;
+	dll_add_to_tail(&forward_table, tmp);
+}
+
 void add_new_node(char *str)
 {
 	char *ptr;
@@ -239,7 +268,93 @@ void add_new_node(char *str)
 	tmp->cost = atoi(ptr);
 
 	/* Add the node to tail of the list */
-	dll_add_to_tail(&node_list, tmp);
+	dll_add_to_tail(&neigh_list, tmp);
+
+	/* Add the node to forward table */
+	add_node_to_fwd_table(tmp->addr,
+			      tmp->cost,
+			      tmp->addr);
+}
+
+struct node *find_dest_entry(int dest)
+{
+	int i;
+        struct node *tmp;
+	int size = dll_size(&neigh_list);
+
+	for (i=0;i<size;i++) {
+                tmp = dll_at(&neigh_list, i);
+		if (tmp->addr == dest) {
+			return tmp;
+		}
+	}
+	return NULL;
+}
+
+struct node *find_route(int dest)
+{
+	int i;
+	struct forward_table_entry *tmp;
+	int size = dll_size(&forward_table);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&forward_table,i);
+		if (tmp->addr == dest) {
+			return find_dest_entry(tmp->next_hop);
+		}
+	}
+	return NULL;
+}
+
+void format_and_send_fwd_table(int addr)
+{
+	char msg[MAX_RTR_MSG_LEN];
+	struct forward_table_entry *tmp;
+	struct node *router;
+	int pos = 6,i;
+	int size = dll_size(&forward_table);
+
+	/* Distance vector */
+	msg[0] = 3;
+	/* Dest */
+	msg[1] = (addr >> 8) & 0x0ff;
+	msg[2] = addr & 0x0ff;
+	/* Src */
+	msg[3] = (myaddr >> 8) & 0x0ff;
+	msg[4] = myaddr & 0x0ff;
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&forward_table,i);
+		if (tmp->cost != -1) {
+			/* 2 bytes address and 1 byte cost */
+			msg[pos++] = (tmp->addr >> 8) & 0x0ff;
+			msg[pos++] = tmp->addr & 0x0ff;
+			if (tmp->addr == addr) {
+				msg[pos++] = INF;
+			} else {
+				msg[pos++] = tmp->cost;
+			}
+		}
+        }
+
+	/* Number of nodes */
+	msg[5] = (pos-6)/3;
+
+	router = find_dest_entry(addr);
+ 	send_msg_to_router(msg,
+			   router);
+}
+
+void send_forward_table()
+{
+	struct node *tmp;
+	int i;
+	int size = dll_size(&neigh_list);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&neigh_list, i);
+		format_and_send_fwd_table(tmp->addr);
+	}
 }
 
 bool get_neigh_details_from_manager()
@@ -260,6 +375,8 @@ bool get_neigh_details_from_manager()
 		printf("%s\n",resp);
 		add_new_node(resp);
 	} while((ptr == NULL) || strcmp(ptr, "DONE"));
+
+	send_forward_table();
 
 	return send_msg_and_chk_ok(READY_MSG);
 }
@@ -294,20 +411,36 @@ void disable_logging()
 	}
 }
 
-void print_node_list()
+void print_neigh_list()
 {
 	int i;
 	struct node *tmp;
-	int size = dll_size(&node_list);
+	int size = dll_size(&neigh_list);
 
-
+	printf("********* Neighbour list***********\n");
 	printf(" Addr  Hostname   Port  Cost\n");
 	for (i=0;i<size;i++) {
-		tmp = dll_at(&node_list, i);
+		tmp = dll_at(&neigh_list, i);
 		printf("%5d ",tmp->addr);
 		printf("%10s ",tmp->hostname);
 		printf("%5u ",tmp->udp_port);
 		printf("%5d\n",tmp->cost);
+	}
+}
+
+void print_forward_table()
+{
+	int i;
+	struct forward_table_entry *tmp;
+	int size = dll_size(&forward_table);
+
+	printf("********Forward Table**********\n");
+	printf(" Addr  Cost  Next-Hop\n");
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&forward_table,i);
+		printf("%5d ",tmp->addr);
+		printf("%5d ",tmp->cost);
+		printf("%7d\n",tmp->next_hop);
 	}
 }
 
@@ -316,10 +449,10 @@ void update_cost_for_node(int node,
 {
 	int i;
 	struct node *tmp;
-	int size = dll_size(&node_list);
+	int size = dll_size(&neigh_list);
 
 	for (i=0;i<size;i++) {
-		tmp = dll_at(&node_list, i);
+		tmp = dll_at(&neigh_list, i);
 		if (tmp->addr == node) {
 			tmp->cost = cost;
 			break;
@@ -341,7 +474,7 @@ void update_cost_of_link(char *msg)
 	printf("Update:%d %d %d\n",node1,node2,cost);
 
 	update_cost_for_node(node, cost);
-	print_node_list();
+	print_neigh_list();
 
 	sprintf(resp, "COST %d OK\n", cost);
 	send_msg_to_manager(resp);
@@ -368,21 +501,6 @@ int handle_manager_event()
 	return ret_val;
 }
 
-struct node *find_dest_entry(int dest)
-{
-	int i;
-        struct node *tmp;
-	int size = dll_size(&node_list);
-
-	for (i=0;i<size;i++) {
-                tmp = dll_at(&node_list, i);
-		if (tmp->addr == dest) {
-			return tmp;
-		}
-	}
-	return NULL;
-}
-
 void format_and_send_data(int dest,
 			  char *in)
 {
@@ -402,7 +520,7 @@ void format_and_send_data(int dest,
 		enable_logging();
 	}
 
-	router = find_dest_entry(dest);
+	router = find_route(dest);
 
 	sprintf(log, LOG_FWD_MSG "%d %s\n", router->addr, in+3);
 
@@ -435,11 +553,17 @@ void handle_router_event()
 		printf("Type 2 message\n");
 		destaddr = (msg[1] << 8) + msg[2];
 		printf("Destination = %d\n", destaddr);
-		printf("Souce = %d\n", (msg[3] << 8) + msg[4]);
+		printf("Source = %d\n", (msg[3] << 8) + msg[4]);
 		printf("msg = %s\n",msg+5);
 
 		sprintf(log, RECV_MSG "%s\n",msg+5);
 		send_msg_and_chk_ok(log);
+	} else if (msg[0] == 3) {
+		printf("Type 3 message\n");
+		destaddr = (msg[1] << 8) + msg[2];
+		printf("Destination = %d\n", destaddr);
+		printf("Source = %d\n", (msg[3] << 8) + msg[4]);
+		printf("count = %d\n",msg[5]);
 	}
 }
 
@@ -475,10 +599,10 @@ void listen_for_events()
 void cleanup()
 {
 	struct node *tmp;
-	while ((tmp = dll_remove_from_head(&node_list))) {
+	while ((tmp = dll_remove_from_head(&neigh_list))) {
 		free(tmp);
 	}
-	dll_destroy(&node_list);
+	dll_destroy(&neigh_list);
 }
 
 int main(int argc, char **argv)
@@ -509,7 +633,9 @@ int main(int argc, char **argv)
 	}
 
 	/* Initialize head of the list */
-	dll_init(&node_list);
+	dll_init(&neigh_list);
+	/* Initalize head of forwarding table */
+	dll_init(&forward_table);
 
 	/* Get neighbour details */
 	if (!get_neigh_details_from_manager()) {
@@ -517,7 +643,10 @@ int main(int argc, char **argv)
 	}
 
 	/* Print node list */
-	print_node_list();
+	print_neigh_list();
+
+	/* Print forward table */
+	print_forward_table();
 
 	/* Listen for incoming messages / events */
 	listen_for_events();

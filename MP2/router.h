@@ -19,6 +19,7 @@ typedef unsigned char bool;
 #define MAX_HOSTNAME_LEN 20
 #define MAX_MGR_MSG_LEN 100
 #define MAX_RTR_MSG_LEN 65535
+#define INF 255
 
 struct node {
 	int addr;
@@ -27,5 +28,10 @@ struct node {
 	int cost;
 };
 
+struct forward_table_entry {
+	int addr;
+	int cost;
+	int next_hop;
+};
 
 #endif // __ROUTER_H__
