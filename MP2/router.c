@@ -337,7 +337,7 @@ void update_cost_of_link(char *msg)
 	node2 = atoi(strtok(NULL, " "));
 	cost  = atoi(strtok(NULL, " "));
 
-	node = (node1==myaddr)?node1:node2;
+	node = (node1==myaddr)?node2:node1;
 	printf("Update:%d %d %d\n",node1,node2,cost);
 
 	update_cost_for_node(node, cost);
