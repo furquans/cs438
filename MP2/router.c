@@ -329,7 +329,7 @@ void format_and_send_fwd_table(int addr)
 			/* 2 bytes address and 1 byte cost */
 			msg[pos++] = (tmp->addr >> 8) & 0x0ff;
 			msg[pos++] = tmp->addr & 0x0ff;
-			if (tmp->addr == addr) {
+			if (tmp->next_hop == addr) {
 				msg[pos++] = INF;
 			} else {
 				msg[pos++] = tmp->cost;
@@ -359,22 +359,33 @@ void send_forward_table()
 
 bool get_neigh_details_from_manager()
 {
-	char resp[MAX_MGR_MSG_LEN];
-	char *ptr;
+	char resp[MAX_MGR_MSG_LEN*MAX_NEIGHBOURS];
+	int ret = 0;
+	char *ptr, *end;
 
 	send_msg_to_manager(NEIGH_MSG);
 
 	do {
-		memset(resp, 0, MAX_MGR_MSG_LEN);
-		recv_msg_from_manager(resp);
-		ptr = strchr(resp, '\n');
-		if (ptr) {
-			*ptr = '\0';
-			ptr++;
+		ret = recv_msg_from_manager(&resp[ret]);
+		if (strstr(resp, "DONE")) {
+			break;
 		}
-		printf("%s\n",resp);
-		add_new_node(resp);
-	} while((ptr == NULL) || strcmp(ptr, "DONE"));
+		resp[ret-1] = '\n';
+	} while (1);
+
+	printf("Resp: %s\n",resp);
+
+	ptr = resp;
+	do {
+		end = strchr(ptr, '\n');
+		if (end == NULL) {
+			break;
+		}
+		*end = '\0';
+		printf("resp:%s\n",ptr);
+		add_new_node(ptr);
+		ptr = end + 1;
+	} while(1);
 
 	send_forward_table();
 
@@ -501,12 +512,30 @@ int handle_manager_event()
 	return ret_val;
 }
 
+void send_data(int dest,
+	       char *msg)
+{
+	struct node *router;
+	char log[MAX_MGR_MSG_LEN];
+
+	if (logging_enabled == 0) {
+		enable_logging();
+	}
+
+	router = find_route(dest);
+
+	sprintf(log, LOG_FWD_MSG "%d %s\n", router->addr, msg+5);
+
+	send_msg_and_chk_ok(log);
+
+	send_msg_to_router(msg,
+			   router);
+}
+
 void format_and_send_data(int dest,
 			  char *in)
 {
 	char msg[MAX_RTR_MSG_LEN];
-	char log[MAX_MGR_MSG_LEN];
-	struct node *router;
 
 	msg[0] = 2;
 	msg[1] = in[1];
@@ -516,18 +545,51 @@ void format_and_send_data(int dest,
 	strcpy(msg+5,
 	       in+3);
 
-	if (logging_enabled == 0) {
-		enable_logging();
+	send_data(dest,
+		  msg);
+}
+
+struct forward_table_entry* find_entry_in_fwd_table(int dest)
+{
+	struct forward_table_entry *tmp;
+	int i;
+	int size = dll_size(&forward_table);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&forward_table,i);
+		if (tmp->addr == dest)
+			return tmp;
 	}
 
-	router = find_route(dest);
+	return NULL;
+}
 
-	sprintf(log, LOG_FWD_MSG "%d %s\n", router->addr, in+3);
+void scan_dist_vectors(char *msg)
+{
+	struct forward_table_entry *tmp;
+	char *ptr;
+	int i;
+	int hop = (msg[3] << 8) + msg[4];
 
-	send_msg_and_chk_ok(log);
+	ptr = msg + 6;
 
-	send_msg_to_router(msg,
-			   router);
+	for (i=0;i<msg[5];i++) {
+		int dest = (ptr[0]<<8) + ptr[1];
+		if (dest != myaddr) {
+			tmp = find_entry_in_fwd_table(dest);
+			if(tmp == NULL) {
+				tmp = malloc(sizeof(*tmp));
+				tmp->addr = dest;
+				tmp->cost = ptr[2];
+				tmp->next_hop = hop;
+				dll_add_to_tail(&forward_table, tmp);
+			} else if (tmp->cost > ptr[2]) {
+				tmp->cost = ptr[2];
+				tmp->next_hop = hop;
+			}
+		}
+		ptr += 3;
+	}
 }
 
 void handle_router_event()
@@ -558,12 +620,17 @@ void handle_router_event()
 
 		sprintf(log, RECV_MSG "%s\n",msg+5);
 		send_msg_and_chk_ok(log);
+		if (destaddr != myaddr) {
+			send_data(destaddr,
+				  msg);
+		}
 	} else if (msg[0] == 3) {
 		printf("Type 3 message\n");
 		destaddr = (msg[1] << 8) + msg[2];
 		printf("Destination = %d\n", destaddr);
 		printf("Source = %d\n", (msg[3] << 8) + msg[4]);
 		printf("count = %d\n",msg[5]);
+		scan_dist_vectors(msg);
 	}
 }
 
