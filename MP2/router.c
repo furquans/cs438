@@ -120,11 +120,11 @@ void send_msg_to_manager(char *msg)
 	}
 }
 
-void send_msg_to_router(char *msg, struct node *router)
+void send_msg_to_router(unsigned char *msg, struct node *router)
 {
 	struct sockaddr_in their_addr;
 	struct hostent *he;
-	int count = strlen(msg);
+	int count = strlen((char*)msg);
 
 	if ((he=gethostbyname(router->hostname)) == NULL) {
 		exit(SOCK_ERROR);
@@ -308,7 +308,7 @@ struct node *find_route(int dest)
 
 void format_and_send_fwd_table(int addr)
 {
-	char msg[MAX_RTR_MSG_LEN];
+	unsigned char msg[MAX_RTR_MSG_LEN];
 	struct forward_table_entry *tmp;
 	struct node *router;
 	int pos = 6,i;
@@ -325,10 +325,13 @@ void format_and_send_fwd_table(int addr)
 
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&forward_table,i);
-		if (tmp->cost != -1) {
-			/* 2 bytes address and 1 byte cost */
-			msg[pos++] = (tmp->addr >> 8) & 0x0ff;
-			msg[pos++] = tmp->addr & 0x0ff;
+		/* 2 bytes address and 1 byte cost */
+		msg[pos++] = (tmp->addr >> 8) & 0x0ff;
+		msg[pos++] = tmp->addr & 0x0ff;
+		
+		if (tmp->cost == -1) {
+			msg[pos++] = INF;
+		} else {
 			if (tmp->next_hop == addr) {
 				msg[pos++] = INF;
 			} else {
@@ -528,7 +531,7 @@ void send_data(int dest,
 
 	send_msg_and_chk_ok(log);
 
-	send_msg_to_router(msg,
+	send_msg_to_router((unsigned char *)msg,
 			   router);
 }
 
@@ -567,22 +570,36 @@ struct forward_table_entry* find_entry_in_fwd_table(int dest)
 void scan_dist_vectors(char *msg)
 {
 	struct forward_table_entry *tmp;
-	char *ptr;
+	unsigned char *ptr;
 	int i;
 	int hop = (msg[3] << 8) + msg[4];
 
-	ptr = msg + 6;
+	ptr = (unsigned char*)msg + 6;
 
 	for (i=0;i<msg[5];i++) {
 		int dest = (ptr[0]<<8) + ptr[1];
 		if (dest != myaddr) {
 			tmp = find_entry_in_fwd_table(dest);
-			if(tmp == NULL) {
+			if((tmp == NULL) && (ptr[2] != INF)) {
+				/* We dont have this entry
+				   and our neighbour has a non-INF
+				   path to this node */
 				tmp = malloc(sizeof(*tmp));
 				tmp->addr = dest;
 				tmp->cost = ptr[2];
 				tmp->next_hop = hop;
 				dll_add_to_tail(&forward_table, tmp);
+			} else if (tmp->next_hop == hop) {
+				/* We have this entry and it is already
+				   going through this neighbour */
+				struct node *node_tmp;
+				node_tmp = find_dest_entry(dest);
+				if ((node_tmp != NULL) && (node_tmp->cost <= ptr[2])) {
+					tmp->cost = node_tmp->cost;
+					tmp->next_hop = dest;
+				} else {
+					tmp->cost = ptr[2];
+				}
 			} else if (tmp->cost > ptr[2]) {
 				tmp->cost = ptr[2];
 				tmp->next_hop = hop;
@@ -590,6 +607,7 @@ void scan_dist_vectors(char *msg)
 		}
 		ptr += 3;
 	}
+	print_forward_table();
 }
 
 void handle_router_event()
