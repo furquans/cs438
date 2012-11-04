@@ -76,7 +76,7 @@ int create_udp_socket(char *port)
 	hints.ai_flags = AI_PASSIVE;
 
 	if (getaddrinfo(NULL,
-			port,
+ 			port,
 			&hints,
 			&servinfo) != 0) {
 		perror("getaddrinfo");
@@ -120,11 +120,12 @@ void send_msg_to_manager(char *msg)
 	}
 }
 
-void send_msg_to_router(unsigned char *msg, struct node *router)
+void send_msg_to_router(unsigned char *msg,
+			int count,
+			struct node *router)
 {
 	struct sockaddr_in their_addr;
 	struct hostent *he;
-	int count = strlen((char*)msg);
 
 	if ((he=gethostbyname(router->hostname)) == NULL) {
 		exit(SOCK_ERROR);
@@ -217,20 +218,7 @@ void add_node_to_fwd_table(int addr,
 			   int cost,
 			   int next_hop)
 {
-	int i;
 	struct forward_table_entry *tmp;
-	int size = dll_size(&forward_table);
-
-	for (i=0;i<size;i++) {
-		tmp = dll_at(&forward_table, i);
-		if (tmp->addr == addr) {
-			if (tmp->cost > cost) {
-				tmp->cost = cost;
-				tmp->next_hop = next_hop;
-			}
-			return;
-		}
-	}
 
 	tmp = malloc(sizeof(*tmp));
 	tmp->addr = addr;
@@ -265,7 +253,11 @@ void add_new_node(char *str)
 
 	/* Extract cost */
 	ptr = strtok(NULL, " ");
-	tmp->cost = atoi(ptr);
+	if(atoi(ptr) != -1) {
+		tmp->cost = atoi(ptr);
+	} else {
+		tmp->cost = INF;
+	}
 
 	/* Add the node to tail of the list */
 	dll_add_to_tail(&neigh_list, tmp);
@@ -300,7 +292,11 @@ struct node *find_route(int dest)
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&forward_table,i);
 		if (tmp->addr == dest) {
-			return find_dest_entry(tmp->next_hop);
+			if (tmp->cost != INF) {
+				return find_dest_entry(tmp->next_hop);
+			} else {
+				break;
+			}
 		}
 	}
 	return NULL;
@@ -328,15 +324,12 @@ void format_and_send_fwd_table(int addr)
 		/* 2 bytes address and 1 byte cost */
 		msg[pos++] = (tmp->addr >> 8) & 0x0ff;
 		msg[pos++] = tmp->addr & 0x0ff;
-		
-		if (tmp->cost == -1) {
+
+		/* Reverse poisoning */
+		if (tmp->next_hop == addr) {
 			msg[pos++] = INF;
 		} else {
-			if (tmp->next_hop == addr) {
-				msg[pos++] = INF;
-			} else {
-				msg[pos++] = tmp->cost;
-			}
+			msg[pos++] = tmp->cost;
 		}
         }
 
@@ -345,6 +338,7 @@ void format_and_send_fwd_table(int addr)
 
 	router = find_dest_entry(addr);
  	send_msg_to_router(msg,
+			   pos,
 			   router);
 }
 
@@ -468,7 +462,11 @@ void update_cost_for_node(int node,
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&neigh_list, i);
 		if (tmp->addr == node) {
-			tmp->cost = cost;
+			if (cost != -1) {
+				tmp->cost = cost;
+			} else {
+				tmp->cost = INF;
+			}
 			break;
 		}
 	}
@@ -489,6 +487,8 @@ void update_cost_of_link(char *msg)
 
 	update_cost_for_node(node, cost);
 	print_neigh_list();
+
+	send_forward_table();
 
 	sprintf(resp, "COST %d OK\n", cost);
 	send_msg_to_manager(resp);
@@ -527,12 +527,22 @@ void send_data(int dest,
 
 	router = find_route(dest);
 
-	sprintf(log, LOG_FWD_MSG "%d %s\n", router->addr, msg+5);
+	if (router) {
 
-	send_msg_and_chk_ok(log);
+		sprintf(log, LOG_FWD_MSG "%d %s\n", router->addr, msg+5);
 
-	send_msg_to_router((unsigned char *)msg,
-			   router);
+		send_msg_and_chk_ok(log);
+
+		send_msg_to_router((unsigned char *)msg,
+				   strlen(msg+5)+5,
+				   router);
+	} else {
+		printf("No path to destination %d found. Dropping packet\n", dest);
+
+		sprintf(log, DROP_MSG "%s\n",msg+5);
+
+		send_msg_and_chk_ok(log);
+	}
 }
 
 void format_and_send_data(int dest,
@@ -573,41 +583,55 @@ void scan_dist_vectors(char *msg)
 	unsigned char *ptr;
 	int i;
 	int hop = (msg[3] << 8) + msg[4];
+	bool updated = 0;
+	struct node *neigh;
 
 	ptr = (unsigned char*)msg + 6;
 
+	neigh = find_dest_entry(hop);
+
 	for (i=0;i<msg[5];i++) {
 		int dest = (ptr[0]<<8) + ptr[1];
+		unsigned int hop_dist;
 		if (dest != myaddr) {
 			tmp = find_entry_in_fwd_table(dest);
-			if((tmp == NULL) && (ptr[2] != INF)) {
+			hop_dist = ptr[2];
+			if (hop_dist != INF) {
+				hop_dist += neigh->cost;
+			}
+			if((tmp == NULL) && (hop_dist != INF)) {
 				/* We dont have this entry
 				   and our neighbour has a non-INF
 				   path to this node */
-				tmp = malloc(sizeof(*tmp));
-				tmp->addr = dest;
-				tmp->cost = ptr[2];
-				tmp->next_hop = hop;
-				dll_add_to_tail(&forward_table, tmp);
+				add_node_to_fwd_table(dest,
+						      hop_dist,
+						      hop);
+				updated = 1;
 			} else if (tmp->next_hop == hop) {
 				/* We have this entry and it is already
 				   going through this neighbour */
 				struct node *node_tmp;
 				node_tmp = find_dest_entry(dest);
-				if ((node_tmp != NULL) && (node_tmp->cost <= ptr[2])) {
+				if ((node_tmp != NULL) && (node_tmp->cost <= hop_dist)) {
 					tmp->cost = node_tmp->cost;
 					tmp->next_hop = dest;
-				} else {
-					tmp->cost = ptr[2];
+					updated = 1;
+				} else if (tmp->cost != hop_dist){
+					tmp->cost = hop_dist;
+					updated = 1;
 				}
-			} else if (tmp->cost > ptr[2]) {
-				tmp->cost = ptr[2];
+			} else if (tmp->cost > hop_dist) {
+				tmp->cost = hop_dist;
 				tmp->next_hop = hop;
+				updated = 1;
 			}
 		}
 		ptr += 3;
 	}
 	print_forward_table();
+	if (updated) {
+		send_forward_table();
+	}
 }
 
 void handle_router_event()
