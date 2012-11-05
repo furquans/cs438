@@ -283,22 +283,31 @@ struct node *find_dest_entry(int dest)
 	return NULL;
 }
 
-struct node *find_route(int dest)
+struct forward_table_entry *find_fwd_table_entry(int dest)
 {
+	struct forward_table_entry *tmp = NULL;
 	int i;
-	struct forward_table_entry *tmp;
 	int size = dll_size(&forward_table);
 
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&forward_table,i);
 		if (tmp->addr == dest) {
-			if (tmp->cost != INF) {
-				return find_dest_entry(tmp->next_hop);
-			} else {
-				break;
-			}
+			return tmp;
 		}
 	}
+	return NULL;
+}
+
+struct node *find_route(int dest)
+{
+	struct forward_table_entry *tmp;
+
+	tmp = find_fwd_table_entry(dest);
+
+	if (tmp && (tmp->cost != INF)) {
+		return find_dest_entry(tmp->next_hop);
+	}
+
 	return NULL;
 }
 
@@ -337,9 +346,26 @@ void format_and_send_fwd_table(int addr)
 	msg[5] = (pos-6)/3;
 
 	router = find_dest_entry(addr);
+	printf("%d:sending message to %d\n",myaddr,addr);
  	send_msg_to_router(msg,
 			   pos,
 			   router);
+}
+
+void send_forward_table_except_node(int node)
+{
+	struct node *tmp;
+	int i;
+	int size = dll_size(&neigh_list);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&neigh_list, i);
+		if ((tmp->cost != INF) &&
+		    (tmp->addr != node)) {
+			printf("sending to:%d,cost:%d\n",tmp->addr,tmp->cost);
+			format_and_send_fwd_table(tmp->addr);			
+		}
+	}
 }
 
 void send_forward_table()
@@ -350,7 +376,10 @@ void send_forward_table()
 
 	for (i=0;i<size;i++) {
 		tmp = dll_at(&neigh_list, i);
-		format_and_send_fwd_table(tmp->addr);
+		if (tmp->cost != INF) {
+			printf("sending to:%d,cost:%d\n",tmp->addr,tmp->cost);
+			format_and_send_fwd_table(tmp->addr);
+		}
 	}
 }
 
@@ -452,24 +481,56 @@ void print_forward_table()
 	}
 }
 
+void update_fwd_tbl(int node,
+		    int diff_cost)
+{
+	int i;
+	struct forward_table_entry *tmp;
+	struct node *dest;
+	int size = dll_size(&forward_table);
+
+	for (i=0;i<size;i++) {
+		tmp = dll_at(&forward_table,i);
+		if (tmp->next_hop == node) {
+			dest = find_dest_entry(tmp->addr);
+			if (dest) {
+				if ((diff_cost == INF) ||
+				    (tmp->cost == INF) ||
+				    (dest->cost < (tmp->cost+diff_cost))) {
+					tmp->cost = dest->cost;
+					tmp->next_hop = dest->addr;
+				} else {
+					tmp->cost += diff_cost;
+				}
+			} else {
+				if (diff_cost == INF) {
+					tmp->cost = INF;
+				} else {
+					tmp->cost += diff_cost;
+				}
+			}
+		}
+	}
+}
+
 void update_cost_for_node(int node,
 			  int cost)
 {
-	int i;
 	struct node *tmp;
-	int size = dll_size(&neigh_list);
+	int diff_cost = INF;
 
-	for (i=0;i<size;i++) {
-		tmp = dll_at(&neigh_list, i);
-		if (tmp->addr == node) {
-			if (cost != -1) {
-				tmp->cost = cost;
-			} else {
-				tmp->cost = INF;
-			}
-			break;
+	tmp = find_dest_entry(node);
+	if (tmp) {
+		if (cost != -1) {
+			diff_cost = cost - tmp->cost;
+			tmp->cost = cost;
+		} else {
+			tmp->cost = INF;
 		}
 	}
+
+	/* Check forwarding table */
+	update_fwd_tbl(node, diff_cost);
 }
 
 void update_cost_of_link(char *msg)
@@ -488,6 +549,7 @@ void update_cost_of_link(char *msg)
 	update_cost_for_node(node, cost);
 	print_neigh_list();
 
+	printf("Link cost change, sending fwd table:%d\n",myaddr);
 	send_forward_table();
 
 	sprintf(resp, "COST %d OK\n", cost);
@@ -583,9 +645,10 @@ void scan_dist_vectors(char *msg)
 	unsigned char *ptr;
 	int i;
 	int hop = (msg[3] << 8) + msg[4];
-	bool updated = 0;
+	bool updated = 0, tell_neigh = 0;
 	struct node *neigh;
 
+	printf("%d:Scanning distance vectors from %d\n",myaddr,hop);
 	ptr = (unsigned char*)msg + 6;
 
 	neigh = find_dest_entry(hop);
@@ -624,13 +687,20 @@ void scan_dist_vectors(char *msg)
 				tmp->cost = hop_dist;
 				tmp->next_hop = hop;
 				updated = 1;
+			} else if ((tmp->cost != INF) &&
+				   ((tmp->cost + neigh->cost) < ptr[2])) {
+				printf("%d:I can provide a better path to neigh %d\n",myaddr,hop);
+				printf("tmp->cost+neigh->cost:%d,ptr[2]:%d\n",tmp->cost+neigh->cost,ptr[2]);
+				tell_neigh = 1;
 			}
 		}
 		ptr += 3;
 	}
 	print_forward_table();
 	if (updated) {
-		send_forward_table();
+		send_forward_table_except_node(hop);
+	} else if (tell_neigh) {
+		format_and_send_fwd_table(hop);
 	}
 }
 
@@ -692,14 +762,14 @@ void listen_for_events()
 		} while (result == -1);
 
 		if (result > 0) {
-			if (FD_ISSET(manager_sockfd, &readset)) {
+			if (FD_ISSET(udp_sockfd, &readset)) {
+				/* Some data on UDP port */
+				handle_router_event();
+			} else if (FD_ISSET(manager_sockfd, &readset)) {
 				/* Some data on manager socket */
 				if (handle_manager_event() == -1) {
 					break;
 				}
-			} else if (FD_ISSET(udp_sockfd, &readset)) {
-				/* Some data on UDP port */
-				handle_router_event();
 			}
 		}
 	} while(1);
