@@ -167,7 +167,6 @@ int recv_msg_from_manager(char *msg)
 	int ret = recv_msg(manager_sockfd,
 			   msg,
 			   MAX_MGR_MSG_LEN);
-	msg[ret-1] = '\0';
 	return ret;
 }
 
@@ -182,11 +181,13 @@ int recv_msg_from_router(char *msg)
 
 bool send_msg_and_chk_ok(char *msg)
 {
+	int ret;
 	char resp[MAX_MGR_MSG_LEN];
 	send_msg_to_manager(msg);
 
-	recv_msg_from_manager(resp);
+	ret = recv_msg_from_manager(resp);
 
+	resp[ret-1] = '\0';
 	return (strcmp(resp,
 		       OK_MSG) == 0);
 }
@@ -194,12 +195,14 @@ bool send_msg_and_chk_ok(char *msg)
 void get_addr_from_manager()
 {
 #define ADDR_STR_LEN 25
+	int ret;
 	char addr[MAX_MGR_MSG_LEN];
 
 	send_msg_to_manager(HELO_MSG);
 
-	recv_msg_from_manager(addr);
+	ret = recv_msg_from_manager(addr);
 
+	addr[ret-1] = '\0';
 	myaddr = atoi(addr+5);
 	printf("My address is:%d\n",myaddr);
 }
@@ -221,6 +224,10 @@ void add_node_to_fwd_table(int addr,
 	struct forward_table_entry *tmp;
 
 	tmp = malloc(sizeof(*tmp));
+	if (tmp == NULL) {
+		printf("Mem alloc failed\n");
+		exit(1);
+	}
 	tmp->addr = addr;
 	tmp->cost = cost;
 	tmp->next_hop = next_hop;
@@ -344,6 +351,7 @@ void format_and_send_fwd_table(int addr)
 
 	/* Number of nodes */
 	msg[5] = (pos-6)/3;
+	printf("count:%d\n",msg[5]);
 
 	router = find_dest_entry(addr);
 	printf("%d:sending message to %d\n",myaddr,addr);
@@ -392,12 +400,13 @@ bool get_neigh_details_from_manager()
 	send_msg_to_manager(NEIGH_MSG);
 
 	do {
-		ret = recv_msg_from_manager(&resp[ret]);
+		ret += recv_msg_from_manager(&resp[ret]);
 		if (strstr(resp, "DONE")) {
 			break;
 		}
-		resp[ret-1] = '\n';
 	} while (1);
+
+	resp[ret-1] = '\0';
 
 	printf("Resp: %s\n",resp);
 
@@ -420,11 +429,14 @@ bool get_neigh_details_from_manager()
 
 void enable_logging()
 {
+	int ret;
 	char resp[MAX_MGR_MSG_LEN];
 
 	send_msg_to_manager(LOG_ON_MSG "\n");
 
-	recv_msg_from_manager(resp);
+	ret = recv_msg_from_manager(resp);
+
+	resp[ret-1] = '\0';
 
 	if (!strcmp(resp,
 		    LOG_ON_MSG)) {
@@ -435,11 +447,14 @@ void enable_logging()
 
 void disable_logging()
 {
+	int ret;
 	char resp[MAX_MGR_MSG_LEN];
 
 	send_msg_to_manager(LOG_OFF_MSG "\n");
 
-	recv_msg_from_manager(resp);
+	ret = recv_msg_from_manager(resp);
+
+	resp[ret-1] = '\0';
 
 	if (!strcmp(resp,
 		    LOG_OFF_MSG)) {
@@ -558,10 +573,12 @@ void update_cost_of_link(char *msg)
 
 int handle_manager_event()
 {
+	int ret;
 	int ret_val = 0;
 	char msg[MAX_MGR_MSG_LEN];
 
-	recv_msg_from_manager(msg);
+	ret = recv_msg_from_manager(msg);
+	msg[ret-1] = '\0';
 
 	if (!strncmp(msg,
 		     LINK_COST_MSG,
@@ -648,32 +665,43 @@ void scan_dist_vectors(char *msg)
 	bool updated = 0, tell_neigh = 0;
 	struct node *neigh;
 
-	printf("%d:Scanning distance vectors from %d\n",myaddr,hop);
+	printf("%d:Scanning distance vectors from %d,count:%d\n",myaddr,hop,msg[5]);
 	ptr = (unsigned char*)msg + 6;
 
 	neigh = find_dest_entry(hop);
+
+	if (neigh == NULL) {
+		printf("neigh not found\n");
+		exit(1);
+	}
 
 	for (i=0;i<msg[5];i++) {
 		int dest = (ptr[0]<<8) + ptr[1];
 		unsigned int hop_dist;
 		if (dest != myaddr) {
+			printf("finding entry in fwd table\n");
 			tmp = find_entry_in_fwd_table(dest);
+			printf("done\n");
 			hop_dist = ptr[2];
 			if (hop_dist != INF) {
 				hop_dist += neigh->cost;
 			}
-			if((tmp == NULL) && (hop_dist != INF)) {
-				/* We dont have this entry
-				   and our neighbour has a non-INF
-				   path to this node */
-				add_node_to_fwd_table(dest,
-						      hop_dist,
-						      hop);
-				updated = 1;
+			if(tmp == NULL){
+				if (hop_dist != INF) {
+					/* We dont have this entry
+					   and our neighbour has a non-INF
+					   path to this node */
+					printf("creating new forward table entry\n");
+					add_node_to_fwd_table(dest,
+							      hop_dist,
+							      hop);
+					updated = 1;
+				}
 			} else if (tmp->next_hop == hop) {
 				/* We have this entry and it is already
 				   going through this neighbour */
 				struct node *node_tmp;
+				printf("updating next hop\n");
 				node_tmp = find_dest_entry(dest);
 				if ((node_tmp != NULL) && (node_tmp->cost <= hop_dist)) {
 					tmp->cost = node_tmp->cost;
@@ -684,6 +712,7 @@ void scan_dist_vectors(char *msg)
 					updated = 1;
 				}
 			} else if (tmp->cost > hop_dist) {
+				printf("updating hop\n");
 				tmp->cost = hop_dist;
 				tmp->next_hop = hop;
 				updated = 1;
@@ -692,6 +721,8 @@ void scan_dist_vectors(char *msg)
 				printf("%d:I can provide a better path to neigh %d\n",myaddr,hop);
 				printf("tmp->cost+neigh->cost:%d,ptr[2]:%d\n",tmp->cost+neigh->cost,ptr[2]);
 				tell_neigh = 1;
+			} else {
+				printf("here:%d,%d\n",tmp->cost,hop_dist);
 			}
 		}
 		ptr += 3;
@@ -714,7 +745,7 @@ void handle_router_event()
 		enable_logging();
 	}
 
-	recv_msg_from_router(msg);
+	printf("bytes:%d\n",recv_msg_from_router(msg));
 
 	if (msg[0]  == 1) {
 		printf("Type 1 message\n");

@@ -13,6 +13,7 @@
 #define LOG_OFF_MSG "LOG OFF"
 #define LOG_FWD_MSG "LOG FWD "
 #define RECV_MSG "RECEIVED "
+#define DROP_MSG "DROP "
 
 typedef unsigned char bool;
 
@@ -26,12 +27,12 @@ struct node {
 	int addr;
 	char hostname[MAX_HOSTNAME_LEN];
 	unsigned int udp_port;
-	int cost;
+	unsigned int cost;
 };
 
 struct forward_table_entry {
 	int addr;
-	int cost;
+	unsigned int cost;
 	int next_hop;
 };
 
