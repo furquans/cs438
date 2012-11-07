@@ -1,5 +1,6 @@
 CC = gcc
 FLAGS = -g -W -Wall
+LIBS = -lrt
 
 all: router
 

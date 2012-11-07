@@ -7,9 +7,15 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+#include <signal.h>
+#include <time.h>
+
 #include "dll.h"
 #include "error.h"
 #include "router.h"
+
+#define CLOCKID CLOCK_REALTIME
+#define SIG SIGUSR1
 
 dll_t neigh_list;
 dll_t forward_table;
@@ -17,6 +23,10 @@ int myaddr;
 int manager_sockfd;
 int udp_sockfd;
 bool logging_enabled;
+bool flag;
+char *pending_mgr_msg;
+
+static timer_t manager_timer, router_timer;
 
 int create_tcp_connection(char *hostname,
 			  char *port)
@@ -112,6 +122,7 @@ int create_udp_socket(char *port)
 void send_msg_to_manager(char *msg)
 {
 	int count = strlen(msg);
+	printf("sending msg to manager:%s",msg);
 	if (send(manager_sockfd,
 		 msg,
 		 count,
@@ -391,7 +402,23 @@ void send_forward_table()
 	}
 }
 
-bool get_neigh_details_from_manager()
+void start_timer(timer_t timer, int seconds)
+{
+	struct itimerspec its;
+
+	its.it_value.tv_sec = seconds;
+	its.it_value.tv_nsec = 0;
+	its.it_interval.tv_sec = 0;
+	its.it_interval.tv_nsec = 0;
+
+        if (timer_settime(timer, 0, &its, NULL) == -1) {
+		perror("timer_settime");
+		exit(1);
+	}
+
+}
+
+static void get_neigh_details_from_manager()
 {
 	char resp[MAX_MGR_MSG_LEN*MAX_NEIGHBOURS];
 	int ret = 0;
@@ -424,7 +451,12 @@ bool get_neigh_details_from_manager()
 
 	send_forward_table();
 
-	return send_msg_and_chk_ok(READY_MSG);
+	pending_mgr_msg = malloc(sizeof(READY_MSG));
+	strcpy(pending_mgr_msg,
+	       READY_MSG);
+
+	start_timer(manager_timer,
+		    2);
 }
 
 void enable_logging()
@@ -443,6 +475,7 @@ void enable_logging()
 		printf("Logging on\n");
 		logging_enabled = 1;
 	}
+	logging_enabled = 1;
 }
 
 void disable_logging()
@@ -552,7 +585,6 @@ void update_cost_of_link(char *msg)
 {
 	int node1, node2, node;
 	int cost;
-	char resp[MAX_MGR_MSG_LEN];
 
 	node1 = atoi(strtok(msg + strlen(LINK_COST_MSG) + 1, " "));
 	node2 = atoi(strtok(NULL, " "));
@@ -567,8 +599,11 @@ void update_cost_of_link(char *msg)
 	printf("Link cost change, sending fwd table:%d\n",myaddr);
 	send_forward_table();
 
-	sprintf(resp, "COST %d OK\n", cost);
-	send_msg_to_manager(resp);
+	pending_mgr_msg = malloc(MAX_MGR_MSG_LEN);
+	sprintf(pending_mgr_msg, "COST %d OK\n", cost);
+	start_timer(manager_timer,
+		    2);
+	flag = 1;
 }
 
 int handle_manager_event()
@@ -661,8 +696,8 @@ void scan_dist_vectors(char *msg)
 	struct forward_table_entry *tmp;
 	unsigned char *ptr;
 	int i;
+	bool updated = 0;
 	int hop = (msg[3] << 8) + msg[4];
-	bool updated = 0, tell_neigh = 0;
 	struct node *neigh;
 
 	printf("%d:Scanning distance vectors from %d,count:%d\n",myaddr,hop,msg[5]);
@@ -716,22 +751,20 @@ void scan_dist_vectors(char *msg)
 				tmp->cost = hop_dist;
 				tmp->next_hop = hop;
 				updated = 1;
-			} else if ((tmp->cost != INF) &&
-				   ((tmp->cost + neigh->cost) < ptr[2])) {
+			}  else if ((tmp->cost != INF) &&
+				    ((tmp->cost + neigh->cost) < ptr[2])) {
 				printf("%d:I can provide a better path to neigh %d\n",myaddr,hop);
 				printf("tmp->cost+neigh->cost:%d,ptr[2]:%d\n",tmp->cost+neigh->cost,ptr[2]);
-				tell_neigh = 1;
-			} else {
-				printf("here:%d,%d\n",tmp->cost,hop_dist);
+				updated = 1;
 			}
 		}
 		ptr += 3;
 	}
 	print_forward_table();
-	if (updated) {
-		send_forward_table_except_node(hop);
-	} else if (tell_neigh) {
-		format_and_send_fwd_table(hop);
+
+	if (updated == 1) {
+		start_timer(router_timer,
+			    1);
 	}
 }
 
@@ -815,12 +848,57 @@ void cleanup()
 	dll_destroy(&neigh_list);
 }
 
+static void timer_handler(int sig,
+			  siginfo_t *si,
+			  void *uc)
+{
+	printf("sig:%d,%p",sig,uc);
+	if (si->si_value.sival_ptr == &manager_timer) {
+		if (pending_mgr_msg) {
+			if (strstr (pending_mgr_msg, "READY")) {
+				if (!send_msg_and_chk_ok(pending_mgr_msg)) {
+					printf("No OK from manager\n");
+					exit(MANAGER_ERROR);
+				}
+			} else {
+				send_msg_to_manager(pending_mgr_msg);
+			}
+			free(pending_mgr_msg);
+			pending_mgr_msg = NULL;
+		}
+	} else if (si->si_value.sival_ptr == &router_timer) {
+		send_forward_table();
+	}
+}
+
+void create_timers()
+{
+	struct sigaction sa;
+	struct sigevent sev;
+
+        sa.sa_flags = SA_SIGINFO;
+	sa.sa_sigaction = timer_handler;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIG, &sa, NULL);
+
+        sev.sigev_notify = SIGEV_SIGNAL;
+        sev.sigev_signo = SIG;
+        sev.sigev_value.sival_ptr = &manager_timer;
+        timer_create(CLOCKID, &sev, &manager_timer);
+
+        sev.sigev_value.sival_ptr = &router_timer;
+        timer_create(CLOCKID, &sev, &router_timer);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 4) {
 		printf("Usage: %s <manager hostname> <TCP port of manager> <UDP port of router>\n",argv[0]);
 		exit(USAGE_ERROR);
 	}
+
+	/* Establish signal handlers */
+	create_timers();
 
 	/* Create a TCP connection with the manager */
 	manager_sockfd = create_tcp_connection(argv[1],
@@ -848,9 +926,7 @@ int main(int argc, char **argv)
 	dll_init(&forward_table);
 
 	/* Get neighbour details */
-	if (!get_neigh_details_from_manager()) {
-		exit(MANAGER_ERROR);
-	}
+	get_neigh_details_from_manager();
 
 	/* Print node list */
 	print_neigh_list();
