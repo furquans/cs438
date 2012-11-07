@@ -26,6 +26,8 @@ bool logging_enabled;
 bool flag;
 char *pending_mgr_msg;
 
+static bool updated = 0, selected = 0;
+
 static timer_t manager_timer, router_timer;
 
 int create_tcp_connection(char *hostname,
@@ -123,11 +125,11 @@ void send_msg_to_manager(char *msg)
 {
 	int count = strlen(msg);
 	printf("sending msg to manager:%s",msg);
-	if (send(manager_sockfd,
-		 msg,
-		 count,
-		 0) < count) {
-		exit(SOCK_ERROR);
+	while (send(manager_sockfd,
+		    msg,
+		    count,
+		    0) < count) {
+		printf("send to manager failed\n");
 	}
 }
 
@@ -139,6 +141,7 @@ void send_msg_to_router(unsigned char *msg,
 	struct hostent *he;
 
 	if ((he=gethostbyname(router->hostname)) == NULL) {
+		printf("gethostname failed\n");
 		exit(SOCK_ERROR);
 	}
 
@@ -147,13 +150,13 @@ void send_msg_to_router(unsigned char *msg,
 	their_addr.sin_addr = *((struct in_addr *)he->h_addr);
 	memset(their_addr.sin_zero, '\0', sizeof(their_addr.sin_zero));
 
-	if (sendto(udp_sockfd,
-		   msg,
-		   count,
-		   0,
-		   (struct sockaddr*)&their_addr,
-		   sizeof(their_addr)) < count) {
-		exit(SOCK_ERROR);
+	while (sendto(udp_sockfd,
+		      msg,
+		      count,
+		      0,
+		      (struct sockaddr*)&their_addr,
+		      sizeof(their_addr)) < count) {
+		printf("send to router failed\n");
 	}
 }
 
@@ -168,6 +171,7 @@ int recv_msg(int sockfd,
 			     0,
 			     NULL,
 			     NULL)) < 0) {
+		printf("Recv from failed\n");
 		exit(SOCK_ERROR);
 	}
 	return ret;
@@ -251,6 +255,7 @@ void add_new_node(char *str)
 	struct node *tmp = malloc(sizeof(*tmp));
 
 	if (tmp == NULL) {
+		printf("malloc failed\n");
 		exit(MEM_ALLOC_ERROR);
 	}
 
@@ -276,6 +281,8 @@ void add_new_node(char *str)
 	} else {
 		tmp->cost = INF;
 	}
+
+	tmp->send_update = 0;
 
 	/* Add the node to tail of the list */
 	dll_add_to_tail(&neigh_list, tmp);
@@ -696,7 +703,6 @@ void scan_dist_vectors(char *msg)
 	struct forward_table_entry *tmp;
 	unsigned char *ptr;
 	int i;
-	bool updated = 0;
 	int hop = (msg[3] << 8) + msg[4];
 	struct node *neigh;
 
@@ -755,14 +761,15 @@ void scan_dist_vectors(char *msg)
 				    ((tmp->cost + neigh->cost) < ptr[2])) {
 				printf("%d:I can provide a better path to neigh %d\n",myaddr,hop);
 				printf("tmp->cost+neigh->cost:%d,ptr[2]:%d\n",tmp->cost+neigh->cost,ptr[2]);
-				updated = 1;
+				selected  = 1;
+				neigh->send_update = 1;
 			}
 		}
 		ptr += 3;
 	}
 	print_forward_table();
 
-	if (updated == 1) {
+	if (updated || selected) {
 		start_timer(router_timer,
 			    1);
 	}
@@ -867,7 +874,25 @@ static void timer_handler(int sig,
 			pending_mgr_msg = NULL;
 		}
 	} else if (si->si_value.sival_ptr == &router_timer) {
-		send_forward_table();
+		if (updated) {
+			send_forward_table();
+			updated = 0;
+			selected = 0;
+		}
+		if (selected) {
+			int i;
+			struct node *tmp;
+			int size = dll_size(&neigh_list);
+
+			for (i=0; i<size;i++) {
+				tmp = dll_at(&neigh_list,i);
+				if (tmp->send_update) {
+					tmp->send_update = 0;
+					format_and_send_fwd_table(tmp->addr);
+				}
+			}
+			selected = 0;
+		}
 	}
 }
 

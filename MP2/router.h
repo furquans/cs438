@@ -28,6 +28,7 @@ struct node {
 	char hostname[MAX_HOSTNAME_LEN];
 	unsigned int udp_port;
 	unsigned int cost;
+	bool send_update;
 };
 
 struct forward_table_entry {
