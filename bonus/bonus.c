@@ -13,7 +13,7 @@ struct data {
 };
 
 static int num_flows = 4;
-static int *weights;
+static double *weights;
 static unsigned long link_rate;
 static void **flows;
 
@@ -34,8 +34,8 @@ void read_weights(FILE *fp)
 	for (wt = strtok(str,tok);
 	     wt;
 	     i++, wt = strtok(NULL,tok)) {
-		weights[i] = atoi(wt);
-		printf("weight:%d\n",weights[i]);
+		weights[i] = atof(wt);
+		printf("weight:%f\n",weights[i]);
 	}
 }
 
@@ -122,10 +122,10 @@ int flows_remaining()
 	return 0;
 }
 
-unsigned int find_total_wt(unsigned long bitmap)
+double find_total_wt(unsigned long bitmap)
 {
 	int i;
-	unsigned int wt = 0;
+        double wt = 0;
 
 	for (i=0;i<num_flows;i++) {
 		if (bitmap & (1<<i)) {
@@ -136,7 +136,7 @@ unsigned int find_total_wt(unsigned long bitmap)
 }
 
 unsigned int find_next_flow(unsigned long bitmap,
-			    unsigned int wt)
+			    double wt)
 {
 	double end_time = 65535;
 	int next_flow = -1;
@@ -163,7 +163,7 @@ void calc_pgps()
 	unsigned long bitmap = 0;
         double curr_time = 0;
 	struct data *tmp;
-	unsigned int total_wt;
+	double total_wt;
 	int flow;
 
 	while(1) {
