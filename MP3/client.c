@@ -10,9 +10,19 @@
 #include<pthread.h>
 
 #include "header.h"
+#include "dll.h"
 
 #define SERVER_PORT 5578
 #define CLIENT_PORT "5580"
+
+dll_t packet_list;
+unsigned int expected_seq = 0;
+
+FILE *fp=NULL;
+
+int client_sockfd=0;
+struct sockaddr_in their_addr;
+socklen_t their_len;
 
 int create_udp_socket(char *port)
 {
@@ -58,15 +68,65 @@ int create_udp_socket(char *port)
 	return sockfd;
 }
 
+int send_ack()
+{
+	struct packet *tmp;
+	struct packet resp;
+	int ret = 0;
+
+	tmp = dll_at(&packet_list,0);
+
+	while (tmp && (tmp->hdr.seq_no == expected_seq)) {
+		expected_seq += tmp->hdr.length;
+		fwrite(tmp->data,
+		       tmp->hdr.length,
+		       1,
+		       fp);
+
+		resp.hdr.flags |= ACK_FLAG;
+		resp.hdr.ack_no = expected_seq;
+		resp.hdr.length = 0;
+
+		if (sendto(client_sockfd,
+			   &resp,
+			   sizeof(struct header),
+			   0,
+			   (struct sockaddr*)&their_addr,
+			   sizeof(their_addr)) < (int)sizeof(struct header)) {
+			perror("sendto");
+			exit(1);
+		}
+		if (tmp->hdr.flags & FIN_FLAG) {
+			printf("FIN received\n");
+			ret = 1;
+		}
+		dll_remove_from_head(&packet_list);
+		free(tmp);
+		tmp = dll_at(&packet_list,0);
+	}
+	return ret;
+}
+
+void add_to_packet_list(struct packet *curr)
+{
+	int i = 0;
+	int size = dll_size(&packet_list);
+
+	while (i < size) {
+		struct packet *tmp = dll_at(&packet_list, i);
+		if (tmp->hdr.seq_no > curr->hdr.seq_no) {
+			dll_add_at_index(&packet_list,curr,i);
+			return;
+		}
+		i++;
+	}
+	dll_add_at_index(&packet_list,curr,i);
+}
+
 int main(int argc,
 	 char **argv)
 {
-	FILE *fp;
-	int client_sockfd;
-	struct sockaddr_in their_addr;
-	socklen_t their_len;
 	struct packet tmp;
-	char str[MAX_DATA_SIZE+1];
 	int ret;
 
 	if (argc != 2) {
@@ -88,43 +148,29 @@ int main(int argc,
 		exit(1);
 	}
 
+	dll_init(&packet_list);
 	their_len = sizeof(their_addr);
+
 	while((ret = recvfrom(client_sockfd,
 			      &tmp,
 			      sizeof(tmp),
 			      0,
 			      (struct sockaddr*)&their_addr,
 			      &their_len)) > 0) {
-		struct packet resp;
-		memcpy(str,
-		       tmp.data,
-		       MAX_DATA_SIZE-1);
-		str[ret-sizeof(struct header)] = '\0';
-		printf("%s",str);
-		fwrite(tmp.data,
-		       tmp.hdr.length,
-		       1,
-		       fp);
+		struct packet *new;
 
-		resp.hdr.flags |= ACK_FLAG;
-		resp.hdr.ack_no = tmp.hdr.seq_no + tmp.hdr.length;
-		resp.hdr.length = 0;
+		new = malloc(sizeof(*new));
+		*new = tmp;
+		printf("seq no:%d\n",tmp.hdr.seq_no);
 
-		if (sendto(client_sockfd,
-			   &resp,
-			   sizeof(struct header),
-			   0,
-			   (struct sockaddr*)&their_addr,
-			   sizeof(their_addr)) < (int)sizeof(struct header)) {
-			perror("sendto");
-			exit(1);
-		}
-			  
+		add_to_packet_list(new);
 
-		if (ret < 100) {
+		if (send_ack() == 1) {
 			break;
 		}
 	}
+
+	dll_destroy(&packet_list);
 
 	fclose(fp);
 	close(client_sockfd);
