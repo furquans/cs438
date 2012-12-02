@@ -158,6 +158,21 @@ unsigned int find_next_flow(unsigned long bitmap,
 	return next_flow;
 }
 
+double find_earliest_time()
+{
+	int i;
+	struct data *tmp;
+	double curr_time = 65535;
+
+	for (i=0; i<num_flows;i++) {
+		tmp = list_peek_head(flows[i]);
+		if (tmp && (curr_time > tmp->arrival_time)) {
+			curr_time = tmp->arrival_time;
+		}
+	}
+	return curr_time;
+}
+
 void calc_pgps()
 {
 	unsigned long bitmap = 0;
@@ -176,7 +191,7 @@ void calc_pgps()
 			printf("%.3f %d\n",curr_time,flow+1);
 			curr_time += (tmp->packet_size / link_rate);
 		} else if (flows_remaining()) {
-			curr_time += 1;
+			curr_time = find_earliest_time();
 		} else {
 			break;
 		}
