@@ -10,6 +10,7 @@
 #include<pthread.h>
 
 #include "header.h"
+#include "dll.h"
 
 #define MAX_FILENAME_LEN 50
 #define SERVER_PORT "5578"
@@ -77,14 +78,38 @@ void prepare_for_udp_send(struct sockaddr_in *their_addr,
 	memset(their_addr->sin_zero, '\0', sizeof(their_addr->sin_zero));
 }
 
+int free_data(unsigned int seq_no,
+	      dll_t *packet_list)
+{
+	int count = 0;
+	while(dll_size(packet_list)) {
+		struct packet *tmp = dll_at(packet_list,0);
+		if (tmp->hdr.seq_no < seq_no) {
+			dll_remove_from_head(packet_list);
+			free(tmp);
+			count++;
+		} else {
+			break;
+		}
+	}
+	return count;
+}
+
 void *send_file(void *arg)
 {
 	FILE *fp;
 	char str[MAX_DATA_SIZE];
 	int ret;
 	int server_sockfd;
-	int seq_no = 1;
+	int seq_no = 0;
 	struct sockaddr_in their_addr;
+	struct sockaddr tmp_addr;
+	unsigned int wind_size = 5;
+	unsigned int curr_wind = 0;
+	fd_set rdfs;
+	struct packet resp;
+	socklen_t tmp_len;
+	dll_t packet_list;
 
 	printf("Server:sending file %s to client\n",filename);
 
@@ -105,6 +130,8 @@ void *send_file(void *arg)
 	prepare_for_udp_send(&their_addr,
 			     CLIENT_PORT);
 
+	dll_init(&packet_list);
+	
 	while ((ret = fread(str,
 			    sizeof(char),
 			    MAX_DATA_SIZE,
@@ -117,7 +144,8 @@ void *send_file(void *arg)
 		       str,
 		       ret);
 		tmp->hdr.length = ret;
-		tmp->hdr.seq_no = seq_no++;
+		tmp->hdr.seq_no = seq_no;
+		seq_no += tmp->hdr.length;
 
 		if (sendto(server_sockfd,
 			   tmp,
@@ -128,8 +156,64 @@ void *send_file(void *arg)
 			printf("send to failed\n");
 			exit(1);
 		}
+
+		dll_add_to_tail(&packet_list,tmp);
+
+		curr_wind++;
+		printf("curr_wind:%d\n",curr_wind);
+		while (curr_wind == wind_size) {
+			int retval;
+			printf("waiting for ack\n");
+			FD_ZERO(&rdfs);
+			FD_SET(server_sockfd, &rdfs);
+
+			retval = select(server_sockfd+1,&rdfs,NULL,NULL,NULL);
+
+			if (FD_ISSET(server_sockfd,&rdfs)) {
+				if (recvfrom(server_sockfd,
+					     &resp,
+					     sizeof(resp),
+					     0,
+					     &tmp_addr,
+					     &tmp_len) > 0) {
+					if (resp.hdr.flags & ACK_FLAG) {
+						curr_wind -= free_data(resp.hdr.ack_no,&packet_list);
+						printf("received ack,curr_win=%d\n",curr_wind);
+					}
+				}
+			} else {
+				printf("error:%d\n",retval);
+			}
+		}
 	}
 
+	while(dll_size(&packet_list)) {
+		int retval;
+		FD_ZERO(&rdfs);
+		FD_SET(server_sockfd, &rdfs);
+
+		printf("packet waiting for ack\n");
+		retval = select(server_sockfd+1,&rdfs,NULL,NULL,NULL);
+
+		if (FD_ISSET(server_sockfd,&rdfs)) {
+			if (recvfrom(server_sockfd,
+				     &resp,
+				     sizeof(resp),
+				     0,
+				     &tmp_addr,
+				     &tmp_len) > 0) {
+				if (resp.hdr.flags & ACK_FLAG) {
+					curr_wind -= free_data(resp.hdr.ack_no,&packet_list);
+					printf("received ack,curr_win=%d\n",curr_wind);
+				}
+			}
+		} else {
+			printf("error:%d\n",retval);
+		}
+	}
+
+	dll_destroy(&packet_list);
+	printf("Done sending file\n");
 	return arg;
 }
 

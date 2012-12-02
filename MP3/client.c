@@ -63,7 +63,7 @@ int main(int argc,
 {
 	FILE *fp;
 	int client_sockfd;
-	struct sockaddr their_addr;
+	struct sockaddr_in their_addr;
 	socklen_t their_len;
 	struct packet tmp;
 	char str[MAX_DATA_SIZE+1];
@@ -88,12 +88,14 @@ int main(int argc,
 		exit(1);
 	}
 
+	their_len = sizeof(their_addr);
 	while((ret = recvfrom(client_sockfd,
 			      &tmp,
 			      sizeof(tmp),
 			      0,
-			      &their_addr,
+			      (struct sockaddr*)&their_addr,
 			      &their_len)) > 0) {
+		struct packet resp;
 		memcpy(str,
 		       tmp.data,
 		       MAX_DATA_SIZE-1);
@@ -103,6 +105,22 @@ int main(int argc,
 		       tmp.hdr.length,
 		       1,
 		       fp);
+
+		resp.hdr.flags |= ACK_FLAG;
+		resp.hdr.ack_no = tmp.hdr.seq_no + tmp.hdr.length;
+		resp.hdr.length = 0;
+
+		if (sendto(client_sockfd,
+			   &resp,
+			   sizeof(struct header),
+			   0,
+			   (struct sockaddr*)&their_addr,
+			   sizeof(their_addr)) < (int)sizeof(struct header)) {
+			perror("sendto");
+			exit(1);
+		}
+			  
+
 		if (ret < 100) {
 			break;
 		}
