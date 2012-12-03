@@ -12,11 +12,25 @@
 #include "header.h"
 #include "dll.h"
 
+#include <signal.h>
+#include <time.h>
+
 #define MAX_FILENAME_LEN 50
 #define SERVER_PORT "5578"
 #define CLIENT_PORT 5580
 
+#define CLOCKID CLOCK_REALTIME
+
 char filename[MAX_FILENAME_LEN];
+
+#define MAX_THREADS 16
+
+struct pthread_info {
+	char used;
+	pthread_t server_tid;
+};
+
+struct pthread_info server_info[MAX_THREADS];
 
 int create_udp_socket(char *port)
 {
@@ -95,6 +109,11 @@ int free_data(unsigned int seq_no,
 	return count;
 }
 
+void alarm_handler(int sig)
+{
+	printf("In pthread handler:%d\n",sig);
+}
+
 void *send_file(void *arg)
 {
 	FILE *fp;
@@ -110,6 +129,11 @@ void *send_file(void *arg)
 	struct packet resp;
 	socklen_t tmp_len;
 	dll_t packet_list;
+	unsigned char fin_sent = 0;
+	struct sigevent sev;
+	timer_t thread_timer;
+	struct itimerspec its;
+	sigset_t set;
 
 	printf("Server:sending file %s to client\n",filename);
 
@@ -130,6 +154,26 @@ void *send_file(void *arg)
 	prepare_for_udp_send(&their_addr,
 			     CLIENT_PORT);
 
+	sigemptyset(&set);
+	sigaddset(&set,SIGUSR1);
+	pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+	signal(SIGUSR2,alarm_handler);
+
+	sev.sigev_notify = SIGEV_SIGNAL;
+	sev.sigev_signo = SIGUSR1;
+	timer_create(CLOCKID, &sev, &thread_timer);
+
+	its.it_value.tv_sec = 1;
+	its.it_value.tv_nsec = 0;
+	its.it_interval.tv_sec = 0;
+	its.it_interval.tv_nsec = 0;
+
+        if (timer_settime(thread_timer, 0, &its, NULL) == -1) {
+		perror("timer_settime");
+		exit(1);
+	}
+
 	dll_init(&packet_list);
 	
 	while ((ret = fread(str,
@@ -145,6 +189,13 @@ void *send_file(void *arg)
 		       ret);
 		tmp->hdr.length = ret;
 		tmp->hdr.seq_no = seq_no;
+		tmp->hdr.flags &= ~(FIN_FLAG);
+		printf("ret:%d,MAX_DATA_SIZE:%d\n",ret,MAX_DATA_SIZE);
+		if ((unsigned int)ret < MAX_DATA_SIZE) {
+			fin_sent = 1;
+			printf("sending FIN_FLAG\n");
+			tmp->hdr.flags |= FIN_FLAG;
+		}
 		seq_no += tmp->hdr.length;
 
 		if (sendto(server_sockfd,
@@ -161,6 +212,9 @@ void *send_file(void *arg)
 
 		curr_wind++;
 		printf("curr_wind:%d\n",curr_wind);
+		if (fin_sent)
+			break;
+
 		while (curr_wind == wind_size) {
 			int retval;
 			printf("waiting for ack\n");
@@ -185,6 +239,19 @@ void *send_file(void *arg)
 				printf("error:%d\n",retval);
 			}
 		}
+	}
+
+	if (!fin_sent) {
+		struct packet tmp;
+		tmp.hdr.flags |= FIN_FLAG;
+		tmp.hdr.seq_no = seq_no;
+		tmp.hdr.length = 0;
+		sendto(server_sockfd,
+		       &tmp,
+		       sizeof(struct header),
+		       0,
+		       (struct sockaddr*)&their_addr,
+		       sizeof(their_addr));
 	}
 
 	while(dll_size(&packet_list)) {
@@ -217,9 +284,41 @@ void *send_file(void *arg)
 	return arg;
 }
 
+int get_free_pthread_info(struct pthread_info *server_info)
+{
+	int i = 0;
+	int ret = -1;
+
+	while (i < MAX_THREADS) {
+		if (server_info[i].used == 0) {
+			server_info[i].used = 1;
+			ret = i;
+			break;
+		}
+		i++;
+	}
+
+	return ret;
+}
+
+void main_handler(int sig,
+		  siginfo_t *si,
+		  void *uc)
+{
+	int i;
+	printf("Main signal handler:%d %p %p\n",sig,si,uc);
+
+	for (i=0;i<MAX_THREADS;i++) {
+		if (server_info[i].used) {
+			pthread_kill(server_info[i].server_tid,SIGUSR2);
+		}
+	}
+}
+
 int main(int argc,char **argv)
 {
-	pthread_t server_tid;
+	int index;
+	struct sigaction sa;
 
 	if (argc != 2) {
 		printf("Usage:%s <filename>\n",argv[0]);
@@ -229,7 +328,14 @@ int main(int argc,char **argv)
 	strcpy(filename,
 	       argv[1]);
 
-	pthread_create(&server_tid,
+	sa.sa_flags = SA_SIGINFO;
+	sa.sa_sigaction = main_handler;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, NULL);
+
+	index = get_free_pthread_info(server_info);
+
+	pthread_create(&server_info[index].server_tid,
 		       NULL,
 		       &send_file,
 		       NULL);

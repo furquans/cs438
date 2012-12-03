@@ -83,19 +83,6 @@ int send_ack()
 		       1,
 		       fp);
 
-		resp.hdr.flags |= ACK_FLAG;
-		resp.hdr.ack_no = expected_seq;
-		resp.hdr.length = 0;
-
-		if (sendto(client_sockfd,
-			   &resp,
-			   sizeof(struct header),
-			   0,
-			   (struct sockaddr*)&their_addr,
-			   sizeof(their_addr)) < (int)sizeof(struct header)) {
-			perror("sendto");
-			exit(1);
-		}
 		if (tmp->hdr.flags & FIN_FLAG) {
 			printf("FIN received\n");
 			ret = 1;
@@ -104,6 +91,21 @@ int send_ack()
 		free(tmp);
 		tmp = dll_at(&packet_list,0);
 	}
+
+	resp.hdr.flags |= ACK_FLAG;
+	resp.hdr.ack_no = expected_seq;
+	resp.hdr.length = 0;
+
+	if (sendto(client_sockfd,
+		   &resp,
+		   sizeof(struct header),
+		   0,
+		   (struct sockaddr*)&their_addr,
+		   sizeof(their_addr)) < (int)sizeof(struct header)) {
+		perror("sendto");
+		exit(1);
+	}
+
 	return ret;
 }
 

@@ -1,6 +1,6 @@
 CC = gcc
 FLAGS = -g -W -Wall
-LIBS = -lpthread
+LIBS = -lpthread -lrt
 
 all: server client
 

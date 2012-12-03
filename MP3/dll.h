@@ -20,5 +20,6 @@ void* dll_remove_from_head(dll_t *l);
 dll_entry_t* dll_pointer_at(dll_t *l,int index);
 void* dll_at(dll_t *l,int index);
 int dll_size(dll_t *l);
+void dll_add_at_index(dll_t *,void *,unsigned int);
 
 #endif
