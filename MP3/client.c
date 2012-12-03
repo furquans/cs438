@@ -114,8 +114,15 @@ void add_to_packet_list(struct packet *curr)
 	int i = 0;
 	int size = dll_size(&packet_list);
 
+	if (curr->hdr.seq_no < expected_seq) {
+		return;
+	}
+
 	while (i < size) {
 		struct packet *tmp = dll_at(&packet_list, i);
+		if (tmp->hdr.seq_no == curr->hdr.seq_no) {
+			return;
+		}
 		if (tmp->hdr.seq_no > curr->hdr.seq_no) {
 			dll_add_at_index(&packet_list,curr,i);
 			return;

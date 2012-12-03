@@ -30,7 +30,18 @@ struct pthread_info {
 	pthread_t server_tid;
 };
 
+struct packet_info {
+	timer_t packet_timer;
+	struct packet *pkt;
+};
+
 struct pthread_info server_info[MAX_THREADS];
+
+static __thread int server_sockfd;
+static __thread struct sockaddr_in their_addr;
+static __thread	struct sockaddr tmp_addr;
+static __thread dll_t packet_list;
+static __thread int rto = 1;
 
 int create_udp_socket(char *port)
 {
@@ -97,10 +108,13 @@ int free_data(unsigned int seq_no,
 {
 	int count = 0;
 	while(dll_size(packet_list)) {
-		struct packet *tmp = dll_at(packet_list,0);
+		struct packet_info *info = dll_at(packet_list,0);
+		struct packet *tmp = info->pkt;
 		if (tmp->hdr.seq_no < seq_no) {
 			dll_remove_from_head(packet_list);
 			free(tmp);
+			timer_delete(info->packet_timer);
+			free(info);
 			count++;
 		} else {
 			break;
@@ -109,9 +123,63 @@ int free_data(unsigned int seq_no,
 	return count;
 }
 
+void create_rto_timer(timer_t *pkt_timer)
+{
+	struct sigevent sev;
+
+	sev.sigev_notify = SIGEV_SIGNAL;
+	sev.sigev_signo = SIGUSR1;
+	timer_create(CLOCKID, &sev, pkt_timer);
+}
+
+void start_rto_timer(timer_t *pkt_timer,
+		     int rto)
+{
+	struct itimerspec its;
+
+	its.it_value.tv_sec = rto;
+	its.it_value.tv_nsec = 0;
+	its.it_interval.tv_sec = 0;
+	its.it_interval.tv_nsec = 0;
+
+        if (timer_settime(*pkt_timer, 0, &its, NULL) == -1) {
+		perror("timer_settime");
+		exit(1);
+	}
+}
+
 void alarm_handler(int sig)
 {
+	int size;
+	int i;
+	struct itimerspec its;
+
 	printf("In pthread handler:%d\n",sig);
+	size = dll_size(&packet_list);
+
+	for (i=0; i<size; i++) {
+		struct packet_info *info = dll_at(&packet_list,i);
+		struct packet *tmp = info->pkt;
+
+		timer_gettime(info->packet_timer,&its);
+
+		if ((its.it_value.tv_sec == 0) &&
+		    (its.it_value.tv_nsec == 0)){
+			int count = sizeof(struct header)+tmp->hdr.length;
+			printf("Timer expired for seq no:%d\n",tmp->hdr.seq_no);
+
+			if (sendto(server_sockfd,
+				   tmp,
+				   count,
+				   0,
+				   (struct sockaddr*)&their_addr,
+				   sizeof(their_addr)) < count) {
+				printf("send to failed\n");
+				exit(1);
+			}
+			start_rto_timer(&info->packet_timer,rto);
+		}
+	}
 }
 
 void *send_file(void *arg)
@@ -119,20 +187,13 @@ void *send_file(void *arg)
 	FILE *fp;
 	char str[MAX_DATA_SIZE];
 	int ret;
-	int server_sockfd;
 	int seq_no = 0;
-	struct sockaddr_in their_addr;
-	struct sockaddr tmp_addr;
 	unsigned int wind_size = 5;
 	unsigned int curr_wind = 0;
 	fd_set rdfs;
 	struct packet resp;
 	socklen_t tmp_len;
-	dll_t packet_list;
 	unsigned char fin_sent = 0;
-	struct sigevent sev;
-	timer_t thread_timer;
-	struct itimerspec its;
 	sigset_t set;
 
 	printf("Server:sending file %s to client\n",filename);
@@ -160,20 +221,6 @@ void *send_file(void *arg)
 
 	signal(SIGUSR2,alarm_handler);
 
-	sev.sigev_notify = SIGEV_SIGNAL;
-	sev.sigev_signo = SIGUSR1;
-	timer_create(CLOCKID, &sev, &thread_timer);
-
-	its.it_value.tv_sec = 1;
-	its.it_value.tv_nsec = 0;
-	its.it_interval.tv_sec = 0;
-	its.it_interval.tv_nsec = 0;
-
-        if (timer_settime(thread_timer, 0, &its, NULL) == -1) {
-		perror("timer_settime");
-		exit(1);
-	}
-
 	dll_init(&packet_list);
 	
 	while ((ret = fread(str,
@@ -181,16 +228,21 @@ void *send_file(void *arg)
 			    MAX_DATA_SIZE,
 			    fp)) != 0) {
 		struct packet *tmp;
+		struct packet_info *info;
 		int count = sizeof(struct header) + ret;
 
+		info = malloc(sizeof(*info));
+		create_rto_timer(&info->packet_timer);
+
 		tmp = malloc(sizeof(*tmp));
+		info->pkt = tmp;
 		memcpy(tmp->data,
 		       str,
 		       ret);
 		tmp->hdr.length = ret;
 		tmp->hdr.seq_no = seq_no;
 		tmp->hdr.flags &= ~(FIN_FLAG);
-		printf("ret:%d,MAX_DATA_SIZE:%d\n",ret,MAX_DATA_SIZE);
+
 		if ((unsigned int)ret < MAX_DATA_SIZE) {
 			fin_sent = 1;
 			printf("sending FIN_FLAG\n");
@@ -198,17 +250,20 @@ void *send_file(void *arg)
 		}
 		seq_no += tmp->hdr.length;
 
-		if (sendto(server_sockfd,
-			   tmp,
-			   count,
-			   0,
-			   (struct sockaddr*)&their_addr,
-			   sizeof(their_addr)) < count) {
-			printf("send to failed\n");
-			exit(1);
+		if (tmp->hdr.seq_no % 168) {
+			if (sendto(server_sockfd,
+				   tmp,
+				   count,
+				   0,
+				   (struct sockaddr*)&their_addr,
+				   sizeof(their_addr)) < count) {
+				printf("send to failed\n");
+				exit(1);
+			}
 		}
+		start_rto_timer(&info->packet_timer,rto);
 
-		dll_add_to_tail(&packet_list,tmp);
+		dll_add_to_tail(&packet_list,info);
 
 		curr_wind++;
 		printf("curr_wind:%d\n",curr_wind);
