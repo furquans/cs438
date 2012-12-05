@@ -173,7 +173,7 @@ double find_earliest_time()
 	return curr_time;
 }
 
-void calc_pgps()
+void calc_pgps(FILE *fp)
 {
 	unsigned long bitmap = 0;
         double curr_time = 0;
@@ -188,7 +188,7 @@ void calc_pgps()
 			total_wt = find_total_wt(bitmap);
 			flow = find_next_flow(bitmap,total_wt);
 			tmp = list_del_head(flows[flow]);
-			printf("%.3f %d\n",curr_time,flow+1);
+			fprintf(fp,"%.3f %d\n",curr_time,flow+1);
 			curr_time += (tmp->packet_size / link_rate);
 		} else if (flows_remaining()) {
 			curr_time = find_earliest_time();
@@ -201,12 +201,13 @@ void calc_pgps()
 int main(int argc, char **argv)
 {
 	FILE *fp;
+	FILE *ofp;
 
-	if (argc == 1) {
-		printf("Usage:%s <filename> [flows]\n",argv[0]);
+	if (argc < 3) {
+		printf("Usage:%s <input_filename> <output_filename> [flows]\n",argv[0]);
 		exit(1);
-	} else if (argc == 3) {
-		num_flows = atoi(argv[2]);
+	} else if (argc == 4) {
+		/* num_flows = atoi(argv[2]); */
 	}
 
 	printf("Number of flows: %d\n", num_flows);
@@ -214,7 +215,14 @@ int main(int argc, char **argv)
 	/* Open the input file */
 	fp = fopen(argv[1],"r");
 	if (fp == NULL) {
-		printf("Error opening file\n");
+		printf("Error opening input file\n");
+		exit(1);
+	}
+
+	/* Open the output file */
+	ofp = fopen(argv[2],"w");
+	if (ofp == NULL) {
+		printf("Error opening output file\n");
 		exit(1);
 	}
 
@@ -234,7 +242,7 @@ int main(int argc, char **argv)
 	trav_flows();
 
 	/* Calculate departure times */
-	calc_pgps();
+	calc_pgps(ofp);
 
 	/* Close the input file */
 	fclose(fp);
