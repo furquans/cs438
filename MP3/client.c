@@ -12,67 +12,27 @@
 #include "header.h"
 #include "dll.h"
 
-#define SERVER_PORT 5578
-#define CLIENT_PORT "5580"
+#define LOCALPORT 3355
 
-dll_t packet_list;
-unsigned int expected_seq = 0;
+static dll_t packet_list;
+static unsigned int expected_seq = 0;
 
-FILE *fp=NULL;
+static FILE *fp=NULL;
+static unsigned short src_port;
 
-int client_sockfd=0;
-struct sockaddr_in their_addr;
-socklen_t their_len;
+static struct sockaddr_in server_addr;
 
-int create_udp_socket(char *port)
-{
-	int sockfd;
-	struct addrinfo hints, *servinfo, *p;
-
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_DGRAM;
-	hints.ai_flags = AI_PASSIVE;
-
-	if (getaddrinfo(NULL,
-			port,
-			&hints,
-			&servinfo) != 0) {
-		perror("getaddrinfo");
-		exit(1);
-	}
-
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype,
-				     p->ai_protocol)) == -1) {
-			perror("socket");
-			continue;
-		}
-
-		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			close(sockfd);
-			perror("bind");
-			continue;
-		}
-
-		break;
-	}
-
-	if (p == NULL) {
-		printf("Failed to bind\n");
-		sockfd = -1;
-	}
-
-	freeaddrinfo(servinfo);
-
-	return sockfd;
-}
+static timer_t rto_timer;
+static struct packet *handshake_msg;
+static int client_sockfd;
+static unsigned short server_port;
 
 int send_ack()
 {
 	struct packet *tmp;
 	struct packet resp;
 	int ret = 0;
+	int flags = ACK_FLAG;
 
 	tmp = dll_at(&packet_list,0);
 
@@ -93,22 +53,17 @@ int send_ack()
 	}
 
 	if (ret == 1) {
-		resp.hdr.flags |= FIN_FLAG;
+		flags |= FIN_FLAG;
 	}
-	resp.hdr.flags |= ACK_FLAG;
-	resp.hdr.ack_no = expected_seq;
-	resp.hdr.length = 0;
+	make_header(&resp,
+		    src_port,
+		    server_port,
+		    0,
+		    expected_seq,
+		    flags,
+		    0);
 
-	if (sendto(client_sockfd,
-		   &resp,
-		   sizeof(struct header),
-		   0,
-		   (struct sockaddr*)&their_addr,
-		   sizeof(their_addr)) < (int)sizeof(struct header)) {
-		perror("sendto");
-		exit(1);
-	}
-
+	send_packet(resp, client_sockfd, &server_addr);
 	return ret;
 }
 
@@ -135,28 +90,18 @@ void add_to_packet_list(struct packet *curr)
 	dll_add_at_index(&packet_list,curr,i);
 }
 
-int main(int argc,
-	 char **argv)
+void get_file(char *filename)
 {
+
 	struct packet tmp;
 	int ret;
+	struct sockaddr_in *their_addr;
+	int their_len;
 
-	if (argc != 2) {
-		printf("Usage:%s <filename>\n",argv[0]);
-		exit(1);
-	}
-
-	fp = fopen(argv[1],"w+");
+	fp = fopen(filename,"w+");
 
 	if (fp == NULL) {
 		printf("Error opening file\n");
-		exit(1);
-	}
-
-	client_sockfd = create_udp_socket(CLIENT_PORT);
-
-	if (client_sockfd == -1) {
-		printf("Socket error\n");
 		exit(1);
 	}
 
@@ -185,6 +130,122 @@ int main(int argc,
 	dll_destroy(&packet_list);
 
 	fclose(fp);
-	close(client_sockfd);
-	return 0;
 }
+
+int udp_connect(int sockfd, char *server_name,unsigned short server_port)
+{
+        int ret,result;
+        unsigned short dst_port=server_port;
+	struct packet resp;
+
+	/* Create retransmission timer */
+	create_rto_timer(&rto_timer);
+
+	/* Create handshake msg */
+	handshake_msg = malloc(sizeof(*handshake_msg));
+
+	/* Send SYN message to server */
+	make_header(handshake_msg,
+		    src_port,
+		    server_port,
+		    0,
+		    0,
+		    SYN_FLAG,
+		    0);
+
+	/* Prepare for Sending to peer */
+	prepare_for_udp_send(&server_addr,
+			     server_name,
+			     server_port);
+
+	/* Send the message to server */
+	send_packet(handshake_msg,
+		    &server_addr);
+
+	/* Start retransmission timer */
+	start_rto_timer(&rto_timer,2);
+
+	/* Wait for an SYN-ACK from server */
+	ret=recv_from(sockfd,
+		      &resp,
+		      MAX_PACKET_SIZE,
+		      server_name,
+		      &dst_port);
+
+	/* Delete the timer */
+	timer_delete(rto_timer);
+
+	server_port = dst_port;
+
+	/* Received SYN-ACK. Send ACK */
+	if((ret>0) && (get_flags(&resp)==(SYN_FLAG+ACK_FLAG))) {
+		printf("good! sending ACK...\n");
+		fflush(stdout);
+		make_header(&handshake_msg,
+			    src_port,
+			    dst_port,
+			    0,
+			    0,
+			    ACK_FLAG,
+			    0);
+		prepare_for_udp_send(&server_addr,
+				     server_name,
+				     dst_port);
+
+		send_packet(handshake_msg,
+			    &server_addr);
+	} else {
+		printf("Problem with SYN-ACK\n");
+		exit(1);
+	}
+	free(handshake_msg);
+}
+
+void main_handler(int sig,
+                  siginfo_t *si,
+                  void *uc)
+{
+	printf("Main signal handler:%d %p %p\n",sig,si,uc);
+
+	if (handshake_msg) {
+		send_packet(handshake_msg, &server_addr);
+		start_rto_timer(&rto_timer,2);
+	}
+}
+
+int main(int argc,
+	 char **argv)
+{
+	char server_name[ADDRSTRLEN];
+	struct sigaction sa;
+
+        if (argc != 4) {
+		fprintf(stderr,"Usage: %s <server name> <server port #> <output file name>\n",argv[0]);
+		exit(1);
+        }
+
+        strcpy(server_name,argv[1]);
+	server_port=atoi(argv[2]);
+        src_port=LOCALPORT;
+
+	/* Initialize signal handler for alarm */
+	sa.sa_flags = SA_SIGINFO;
+	sa.sa_sigaction = main_handler;
+        sigemptyset(&sa.sa_mask);
+	sigaction(SIGUSR1, &sa, NULL);
+
+	/* Create UDP socket */
+	client_sockfd = create_udp_socket(src_port);
+
+	/* Connect to peer */
+	udp_connect(client_sockfd,server_name,server_port);
+
+	/* Get file */
+	get_file(argv[3]);
+
+        close(client_sockfd);
+
+        return 0;
+
+}
+
