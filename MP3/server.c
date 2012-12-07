@@ -42,6 +42,10 @@ static __thread timer_t rto_timer;
 static __thread int fin_resend_count=0;
 static __thread int fin_seq_no;
 
+static __thread	unsigned char fin_sent = 0;
+static __thread	unsigned char fin_rcvd = 0;
+
+
 int create_udp_socket(char *port)
 {
 	int sockfd;
@@ -142,7 +146,7 @@ int free_data(unsigned int seq_no,
 			break;
 		}
 	}
-	if (dll_size(packet_list)) {
+	if (dll_size(packet_list) || (fin_rcvd == 0)) {
 		start_rto_timer(&rto_timer,rto);
 	} else {
 		timer_delete(rto_timer);
@@ -195,8 +199,10 @@ void alarm_handler(int sig)
 			if ((fin_rcvd == 0) &&
 			    (fin_resend_count < MAX_FIN_RESEND)) {
 				fin_resend_count++;
+				printf("Resending fin:%d\n",fin_resend_count);
 				send_fin();
 			} else {
+				printf("Fin resend count exceeded.exiting\n");
 				pthread_exit(NULL);
 			}
 		}
@@ -215,8 +221,6 @@ void *send_file(void *arg)
 	fd_set rdfs;
 	struct packet resp;
 	socklen_t tmp_len;
-	unsigned char fin_sent = 0;
-	unsigned char fin_rcvd = 0;
 	sigset_t set;
 
 	printf("Server:sending file %s to client\n",filename);
@@ -269,7 +273,7 @@ void *send_file(void *arg)
 		}
 		seq_no += tmp->hdr.length;
 
-		if ((tmp->hdr.seq_no == 0) || (tmp->hdr.seq_no % 336)) {
+		/* if ((tmp->hdr.seq_no == 0) || (tmp->hdr.seq_no % 336)) { */
 			if (sendto(server_sockfd,
 				   tmp,
 				   count,
@@ -279,7 +283,7 @@ void *send_file(void *arg)
 				printf("send to failed\n");
 				exit(1);
 			}
-		}
+		/* } */
 
 		if (dll_size(&packet_list) == 0) {
 			start_rto_timer(&rto_timer,rto);
@@ -317,6 +321,8 @@ void *send_file(void *arg)
 			}
 		}
 	}
+
+	fin_seq_no = seq_no;
 
 	if (!fin_sent) {
 		send_fin();
@@ -417,9 +423,9 @@ int main(int argc,char **argv)
 	int index;
 	struct sigaction sa;
 
-	if (argc != 2) {
-		printf("Usage:%s <filename>\n",argv[0]);
-		exit(1);
+	if (argc != 3) {
+		printf("Usage: %s <server port #> <input file name>\n",argv[0]);
+                exit(1);
 	}
 
 	strcpy(filename,

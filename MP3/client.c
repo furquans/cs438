@@ -92,6 +92,9 @@ int send_ack()
 		tmp = dll_at(&packet_list,0);
 	}
 
+	if (ret == 1) {
+		resp.hdr.flags |= FIN_FLAG;
+	}
 	resp.hdr.flags |= ACK_FLAG;
 	resp.hdr.ack_no = expected_seq;
 	resp.hdr.length = 0;
