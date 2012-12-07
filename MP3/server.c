@@ -18,6 +18,7 @@
 #define MAX_FILENAME_LEN 50
 #define SERVER_PORT "5578"
 #define CLIENT_PORT 5580
+#define MAX_FIN_RESEND 5
 
 #define CLOCKID CLOCK_REALTIME
 
@@ -30,11 +31,6 @@ struct pthread_info {
 	pthread_t server_tid;
 };
 
-struct packet_info {
-	timer_t packet_timer;
-	struct packet *pkt;
-};
-
 struct pthread_info server_info[MAX_THREADS];
 
 static __thread int server_sockfd;
@@ -42,6 +38,9 @@ static __thread struct sockaddr_in their_addr;
 static __thread	struct sockaddr tmp_addr;
 static __thread dll_t packet_list;
 static __thread int rto = 1;
+static __thread timer_t rto_timer;
+static __thread int fin_resend_count=0;
+static __thread int fin_seq_no;
 
 int create_udp_socket(char *port)
 {
@@ -103,26 +102,6 @@ void prepare_for_udp_send(struct sockaddr_in *their_addr,
 	memset(their_addr->sin_zero, '\0', sizeof(their_addr->sin_zero));
 }
 
-int free_data(unsigned int seq_no,
-	      dll_t *packet_list)
-{
-	int count = 0;
-	while(dll_size(packet_list)) {
-		struct packet_info *info = dll_at(packet_list,0);
-		struct packet *tmp = info->pkt;
-		if (tmp->hdr.seq_no < seq_no) {
-			dll_remove_from_head(packet_list);
-			free(tmp);
-			timer_delete(info->packet_timer);
-			free(info);
-			count++;
-		} else {
-			break;
-		}
-	}
-	return count;
-}
-
 void create_rto_timer(timer_t *pkt_timer)
 {
 	struct sigevent sev;
@@ -146,28 +125,63 @@ void start_rto_timer(timer_t *pkt_timer,
 		perror("timer_settime");
 		exit(1);
 	}
+	printf("started rto timer\n");
+}
+
+int free_data(unsigned int seq_no,
+	      dll_t *packet_list)
+{
+	int count = 0;
+	while(dll_size(packet_list)) {
+		struct packet *tmp = dll_at(packet_list,0);
+		if (tmp->hdr.seq_no < seq_no) {
+			dll_remove_from_head(packet_list);
+			free(tmp);
+			count++;
+		} else {
+			break;
+		}
+	}
+	if (dll_size(packet_list)) {
+		start_rto_timer(&rto_timer,rto);
+	} else {
+		timer_delete(rto_timer);
+	}
+
+	return count;
+}
+
+void send_fin()
+{
+	struct packet tmp;
+	tmp.hdr.flags |= FIN_FLAG;
+	tmp.hdr.seq_no = fin_seq_no;
+	tmp.hdr.length = 0;
+	sendto(server_sockfd,
+	       &tmp,
+	       sizeof(struct header),
+	       0,
+	       (struct sockaddr*)&their_addr,
+	       sizeof(their_addr));
 }
 
 void alarm_handler(int sig)
 {
 	int size;
-	int i;
 	struct itimerspec its;
 
 	printf("In pthread handler:%d\n",sig);
 	size = dll_size(&packet_list);
+	timer_gettime(rto_timer,&its);
 
-	for (i=0; i<size; i++) {
-		struct packet_info *info = dll_at(&packet_list,i);
-		struct packet *tmp = info->pkt;
+	if ((its.it_value.tv_sec == 0) &&
+	    (its.it_value.tv_nsec == 0)) {
 
-		timer_gettime(info->packet_timer,&its);
-
-		if ((its.it_value.tv_sec == 0) &&
-		    (its.it_value.tv_nsec == 0)){
-			int count = sizeof(struct header)+tmp->hdr.length;
-			printf("Timer expired for seq no:%d\n",tmp->hdr.seq_no);
-
+		if (size) {
+			int count;
+			struct packet *tmp = dll_at(&packet_list,0);
+			printf("Retransmitting packet with seq number:%d\n",tmp->hdr.seq_no);
+			count = sizeof(struct header)+tmp->hdr.length;
 			if (sendto(server_sockfd,
 				   tmp,
 				   count,
@@ -177,8 +191,16 @@ void alarm_handler(int sig)
 				printf("send to failed\n");
 				exit(1);
 			}
-			start_rto_timer(&info->packet_timer,rto);
+		} else if (fin_sent == 1) {
+			if ((fin_rcvd == 0) &&
+			    (fin_resend_count < MAX_FIN_RESEND)) {
+				fin_resend_count++;
+				send_fin();
+			} else {
+				pthread_exit(NULL);
+			}
 		}
+		start_rto_timer(&rto_timer,rto);
 	}
 }
 
@@ -188,12 +210,13 @@ void *send_file(void *arg)
 	char str[MAX_DATA_SIZE];
 	int ret;
 	int seq_no = 0;
-	unsigned int wind_size = 5;
+	unsigned int wind_size = 10;
 	unsigned int curr_wind = 0;
 	fd_set rdfs;
 	struct packet resp;
 	socklen_t tmp_len;
 	unsigned char fin_sent = 0;
+	unsigned char fin_rcvd = 0;
 	sigset_t set;
 
 	printf("Server:sending file %s to client\n",filename);
@@ -222,20 +245,16 @@ void *send_file(void *arg)
 	signal(SIGUSR2,alarm_handler);
 
 	dll_init(&packet_list);
+	create_rto_timer(&rto_timer);
 	
 	while ((ret = fread(str,
 			    sizeof(char),
 			    MAX_DATA_SIZE,
 			    fp)) != 0) {
 		struct packet *tmp;
-		struct packet_info *info;
 		int count = sizeof(struct header) + ret;
 
-		info = malloc(sizeof(*info));
-		create_rto_timer(&info->packet_timer);
-
 		tmp = malloc(sizeof(*tmp));
-		info->pkt = tmp;
 		memcpy(tmp->data,
 		       str,
 		       ret);
@@ -250,7 +269,7 @@ void *send_file(void *arg)
 		}
 		seq_no += tmp->hdr.length;
 
-		if (tmp->hdr.seq_no % 168) {
+		if ((tmp->hdr.seq_no == 0) || (tmp->hdr.seq_no % 336)) {
 			if (sendto(server_sockfd,
 				   tmp,
 				   count,
@@ -261,9 +280,12 @@ void *send_file(void *arg)
 				exit(1);
 			}
 		}
-		start_rto_timer(&info->packet_timer,rto);
 
-		dll_add_to_tail(&packet_list,info);
+		if (dll_size(&packet_list) == 0) {
+			start_rto_timer(&rto_timer,rto);
+		}
+
+		dll_add_to_tail(&packet_list,tmp);
 
 		curr_wind++;
 		printf("curr_wind:%d\n",curr_wind);
@@ -297,16 +319,7 @@ void *send_file(void *arg)
 	}
 
 	if (!fin_sent) {
-		struct packet tmp;
-		tmp.hdr.flags |= FIN_FLAG;
-		tmp.hdr.seq_no = seq_no;
-		tmp.hdr.length = 0;
-		sendto(server_sockfd,
-		       &tmp,
-		       sizeof(struct header),
-		       0,
-		       (struct sockaddr*)&their_addr,
-		       sizeof(their_addr));
+		send_fin();
 	}
 
 	while(dll_size(&packet_list)) {
@@ -324,6 +337,10 @@ void *send_file(void *arg)
 				     0,
 				     &tmp_addr,
 				     &tmp_len) > 0) {
+				if (resp.hdr.flags & FIN_FLAG) {
+					printf("Fin received\n");
+					fin_rcvd = 1;
+				}
 				if (resp.hdr.flags & ACK_FLAG) {
 					curr_wind -= free_data(resp.hdr.ack_no,&packet_list);
 					printf("received ack,curr_win=%d\n",curr_wind);
@@ -332,6 +349,31 @@ void *send_file(void *arg)
 		} else {
 			printf("error:%d\n",retval);
 		}
+	}
+
+	while (fin_rcvd == 0) {
+		int retval;
+		FD_ZERO(&rdfs);
+		FD_SET(server_sockfd, &rdfs);
+
+		printf("packet waiting for fin\n");
+		retval = select(server_sockfd+1,&rdfs,NULL,NULL,NULL);
+
+		if (FD_ISSET(server_sockfd,&rdfs)) {
+			if (recvfrom(server_sockfd,
+				     &resp,
+				     sizeof(resp),
+				     0,
+				     &tmp_addr,
+				     &tmp_len) > 0) {
+				if (resp.hdr.flags & FIN_FLAG) {
+					fin_rcvd = 1;
+					printf("received fin\n");
+				}
+			}
+		} else {
+			printf("error:%d\n",retval);
+		}		
 	}
 
 	dll_destroy(&packet_list);
