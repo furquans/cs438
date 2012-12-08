@@ -26,7 +26,7 @@ static struct sockaddr_in server_addr;
 
 static timer_t rto_timer;
 static struct packet *handshake_msg;
-static int client_sockfd;
+static int client_sockfd = -1;
 static unsigned short server_port;
 
 int send_ack()
@@ -248,7 +248,9 @@ int main(int argc,
 	sigaction(SIGUSR1, &sa, NULL);
 
 	/* Create UDP socket */
-	client_sockfd = create_udp_socket(src_port);
+	while((client_sockfd = create_udp_socket(src_port)) == -1) {
+		src_port++;
+	}
 
 	/* Connect to peer */
 	udp_connect(client_sockfd,server_name);
