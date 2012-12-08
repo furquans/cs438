@@ -17,6 +17,7 @@
 
 #define MAX_FILENAME_LEN 50
 #define MAX_RESEND 5
+#define MSS 100
 
 char filename[MAX_FILENAME_LEN];
 
@@ -61,7 +62,7 @@ int free_data(unsigned int seq_no,
 			break;
 		}
 	}
-	if (dll_size(packet_list) || (fin_rcvd == 0)) {
+	if (dll_size(packet_list) || ((fin_sent == 1) && (fin_rcvd == 0))) {
 		start_rto_timer(&rto_timer,rto);
 	} else {
 		timer_delete(rto_timer);
@@ -171,7 +172,7 @@ void send_file()
 	char str[MAX_DATA_SIZE];
 	int ret;
 	int seq_no = 0;
-	unsigned int wind_size = 10;
+	unsigned int wind_size = 5 * MSS;
 	unsigned int curr_wind = 0;
 
 	printf("Server:sending file %s to client\n",filename);
@@ -222,6 +223,7 @@ void send_file()
 
 		printf("seq no:%d\n",tmp->hdr.seq_no);
 		/* Send the packet */
+		if ((tmp->hdr.seq_no == 0) || (tmp->hdr.seq_no % 420))
 		send_packet(tmp, server_sockfd, (struct sockaddr*)&client_addr);
 
 		/* Check if we need to restart the rto timer */
@@ -235,17 +237,19 @@ void send_file()
 		dll_add_to_tail(&packet_list,tmp);
 
 		/* Increase the count of outstanding packets */
-		curr_wind++;
-		printf("curr_wind:%d\n",curr_wind);
+		curr_wind+=MSS;
+		printf("curr_wind:%d,wind_size:%d\n",curr_wind,wind_size);
 
 		/* If fin is sent, just break from here */
 		if (fin_sent)
 			break;
 
 		/* Wait for window size to open */
-		while (curr_wind == wind_size) {
-			curr_wind -= wait_for_ack();
-			printf("received ack,curr_win=%d\n",curr_wind);
+		while ((wind_size == curr_wind) || ((wind_size - curr_wind) < MSS)) {
+		/* while (curr_wind == wind_size) { */
+			wind_size += wait_for_ack() * MSS;
+			/* curr_wind -= wait_for_ack(); */
+			printf("received ack,curr_win=%d,wind_size=%d\n",curr_wind,wind_size);
 		}
 	}
 
@@ -258,8 +262,9 @@ void send_file()
 
 	/* Wait for ACK of all packets */
 	while(dll_size(&packet_list)) {
-		curr_wind -= wait_for_ack();
-		printf("received ack,curr_win=%d\n",curr_wind);
+		wind_size += wait_for_ack() * MSS;
+		/* curr_wind -= wait_for_ack(); */
+		printf("received ack,curr_win=%d,wind_size=%d\n",curr_wind,wind_size);
 	}
 
 	/* Wait for FIN */
