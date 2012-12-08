@@ -47,6 +47,7 @@ static __thread	unsigned char fin_sent = 0;
 static __thread	unsigned char fin_rcvd = 0;
 static __thread struct packet *handshake_msg;
 static __thread int handshake_resend_count = 0;
+static __thread double wind_size = 1 * MSS;
 
 int free_data(unsigned int seq_no,
 	      dll_t *packet_list)
@@ -172,8 +173,8 @@ void send_file()
 	char str[MAX_DATA_SIZE];
 	int ret;
 	int seq_no = 0;
-	unsigned int wind_size = 5 * MSS;
-	unsigned int curr_wind = 0;
+        unsigned int pkt_sent=0,pkt_ackd=0;
+        double curr_wind = 0;
 
 	printf("Server:sending file %s to client\n",filename);
 
@@ -237,19 +238,23 @@ void send_file()
 		dll_add_to_tail(&packet_list,tmp);
 
 		/* Increase the count of outstanding packets */
-		curr_wind+=MSS;
-		printf("curr_wind:%d,wind_size:%d\n",curr_wind,wind_size);
+		pkt_sent++;
+		curr_wind = (pkt_sent - pkt_ackd) * MSS;
+		printf("curr_wind:%f,wind_size:%f\n",curr_wind,wind_size);
 
 		/* If fin is sent, just break from here */
 		if (fin_sent)
 			break;
 
 		/* Wait for window size to open */
-		while ((wind_size == curr_wind) || ((wind_size - curr_wind) < MSS)) {
-		/* while (curr_wind == wind_size) { */
-			wind_size += wait_for_ack() * MSS;
-			/* curr_wind -= wait_for_ack(); */
-			printf("received ack,curr_win=%d,wind_size=%d\n",curr_wind,wind_size);
+		while ((wind_size - curr_wind) < MSS) {
+			pkt_ackd += wait_for_ack();
+			if (pkt_ackd > pkt_sent) {
+				printf("Oops..more pkts acked than sent?\n");
+				exit(1);
+			}
+			curr_wind = (pkt_sent - pkt_ackd) * MSS;
+			printf("received ack,curr_win=%f,wind_size=%f\n",curr_wind,wind_size);
 		}
 	}
 
@@ -262,9 +267,8 @@ void send_file()
 
 	/* Wait for ACK of all packets */
 	while(dll_size(&packet_list)) {
-		wind_size += wait_for_ack() * MSS;
-		/* curr_wind -= wait_for_ack(); */
-		printf("received ack,curr_win=%d,wind_size=%d\n",curr_wind,wind_size);
+		pkt_ackd += wait_for_ack();
+		printf("received ack,curr_win=%f,wind_size=%f\n",curr_wind,wind_size);
 	}
 
 	/* Wait for FIN */
