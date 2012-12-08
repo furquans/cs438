@@ -364,7 +364,6 @@ void udp_listen(int sockfd)
         int ret;
         struct sock_packet *sp;
         pthread_t *tid;
-	static int flag = 0;
 
         printf("listening...\n");
         fflush(stdout);
@@ -378,10 +377,6 @@ void udp_listen(int sockfd)
 				    MAX_PACKET_SIZE,
 				    sp->hostname,
 				    &(sp->port)))>0) {
-			if (flag == 0) {
-				flag = 1;
-				continue;
-			}
                         dll_add_to_tail(&tid_dll,tid);
                         pthread_create(tid, NULL, &udp_accept,(void*)sp);
                 }
