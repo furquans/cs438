@@ -9,7 +9,7 @@
 #include<arpa/inet.h>
 #include<pthread.h>
 
-#include "header.h"
+#include "helper.h"
 #include "dll.h"
 
 #include <signal.h>
@@ -17,8 +17,6 @@
 
 #define MAX_FILENAME_LEN 50
 #define MAX_RESEND 5
-
-#define CLOCKID CLOCK_REALTIME
 
 char filename[MAX_FILENAME_LEN];
 
@@ -46,66 +44,8 @@ static __thread unsigned short client_port;
 
 static __thread	unsigned char fin_sent = 0;
 static __thread	unsigned char fin_rcvd = 0;
-
-void prepare_for_udp_send(struct sockaddr_in *their_addr,
-			  char *name,
-			  int port)
-{
-	struct hostent *he;
-
-	if ((he=gethostbyname(name)) == NULL) {
-		printf("gethostname failed\n");
-		exit(1);
-	}
-
-	their_addr->sin_family = AF_INET;
-	their_addr->sin_port = htons(port);
-	their_addr->sin_addr = *((struct in_addr *)he->h_addr);
-	memset(their_addr->sin_zero, '\0', sizeof(their_addr->sin_zero));
-}
-
-void send_packet(struct packet *p,
-		 int mysockfd,
-		 struct sockaddr *their_addr)
-{
-	int count = sizeof(p->hdr) + p->hdr.length;
-
-	if (sendto(mysockfd,
-		   p,
-		   count,
-		   0,
-		   their_addr,
-		   sizeof(*their_addr)) < count) {
-		printf("send to failed\n");
-		exit(1);
-	}
-}
-
-void create_rto_timer(timer_t *pkt_timer)
-{
-	struct sigevent sev;
-
-	sev.sigev_notify = SIGEV_SIGNAL;
-	sev.sigev_signo = SIGUSR1;
-	timer_create(CLOCKID, &sev, pkt_timer);
-}
-
-void start_rto_timer(timer_t *pkt_timer,
-		     int rto)
-{
-	struct itimerspec its;
-
-	its.it_value.tv_sec = rto;
-	its.it_value.tv_nsec = 0;
-	its.it_interval.tv_sec = 0;
-	its.it_interval.tv_nsec = 0;
-
-        if (timer_settime(*pkt_timer, 0, &its, NULL) == -1) {
-		perror("timer_settime");
-		exit(1);
-	}
-	printf("started rto timer\n");
-}
+static __thread struct packet *handshake_msg;
+static __thread int handshake_resend_count = 0;
 
 int free_data(unsigned int seq_no,
 	      dll_t *packet_list)
@@ -134,7 +74,7 @@ void send_fin()
 {
 	struct packet tmp;
 
-	make_header(tmp,
+	make_header(&tmp,
 		    src_port,
 		    client_port,
 		    fin_seq_no,
@@ -142,7 +82,7 @@ void send_fin()
 		    FIN_FLAG,
 		    0);
 
-	send_packet(tmp,server_sockfd,&client_addr);
+	send_packet(&tmp,server_sockfd,(struct sockaddr*)&client_addr);
 }
 
 void alarm_handler(int sig)
@@ -159,7 +99,7 @@ void alarm_handler(int sig)
 		if (handshake_msg) {
 			if (handshake_resend_count < MAX_RESEND) {
 				/* Send handshake msg 2 */
-				send_packet(handshake_msg,server_sockfd,&client_addr);
+				send_packet(handshake_msg,server_sockfd,(struct sockaddr*)&client_addr);
 				/* Increment the count */
 				handshake_resend_count++;
 			} else {
@@ -168,13 +108,13 @@ void alarm_handler(int sig)
 			}
 
 		} else if (size) {
-			int count;
 			struct packet *tmp = dll_at(&packet_list,0);
 			printf("Retransmitting packet with seq number:%d\n",tmp->hdr.seq_no);
-			send_packet(tmp,server_sockfd,&client_addr);
+			show_header(tmp);
+			send_packet(tmp,server_sockfd,(struct sockaddr*)&client_addr);
 		} else if (fin_sent == 1) {
 			if ((fin_rcvd == 0) &&
-			    (fin_resend_count < MAX_FIN_RESEND)) {
+			    (fin_resend_count < MAX_RESEND)) {
 				fin_resend_count++;
 				printf("Resending fin:%d\n",fin_resend_count);
 				send_fin();
@@ -191,7 +131,7 @@ int wait_for_ack()
 {
 	int retval;
 	fd_set rdfs;
-	sockaddr tmp_addr;
+	struct sockaddr tmp_addr;
 	socklen_t tmp_len;
 	struct packet resp;
 
@@ -209,9 +149,11 @@ int wait_for_ack()
 			     &tmp_addr,
 			     &tmp_len) > 0) {
 			if (resp.hdr.flags & ACK_FLAG) {
+				show_header(&resp);
 				retval = free_data(resp.hdr.ack_no,&packet_list);
 			}
 			if (resp.hdr.flags & FIN_FLAG) {
+				printf("FIN received\n");
 				fin_rcvd = 1;
 			}
 		}
@@ -229,7 +171,7 @@ void send_file()
 	char str[MAX_DATA_SIZE];
 	int ret;
 	int seq_no = 0;
-	unsigned int wind_size = 2;
+	unsigned int wind_size = 10;
 	unsigned int curr_wind = 0;
 
 	printf("Server:sending file %s to client\n",filename);
@@ -256,7 +198,7 @@ void send_file()
 		tmp = malloc(sizeof(*tmp));
 
 		/* Check if less data than MAX, then send FIN */
-		if (ret < MAX_DATA_SIZE) {
+		if (ret != MAX_DATA_SIZE) {
 			flags |= FIN_FLAG;
 			fin_sent = 1;
 		}
@@ -275,13 +217,17 @@ void send_file()
 		       str,
 		       ret);
 
+		tmp->hdr.seq_no = seq_no;
 		seq_no += ret;
 
+		printf("seq no:%d\n",tmp->hdr.seq_no);
 		/* Send the packet */
-		send_packet(tmp, server_sockfd, &client_addr);
+		send_packet(tmp, server_sockfd, (struct sockaddr*)&client_addr);
 
 		/* Check if we need to restart the rto timer */
 		if (dll_size(&packet_list) == 0) {
+			printf("starting timer\n");
+			create_rto_timer(&rto_timer);
 			start_rto_timer(&rto_timer,rto);
 		}
 
@@ -321,20 +267,22 @@ void send_file()
 		wait_for_ack();
 	}
 
+	timer_delete(rto_timer);
 	dll_destroy(&packet_list);
 	printf("Done sending file\n");
-	return arg;
 }
 
 void* udp_accept(void *arg)
 {
-        struct sock_packet *sp= (struct sock_packet*)arg;
-        struct packet *p= &(sp->p);
+        struct sock_packet *sp;
+        struct packet *p;
 	struct packet resp;
-        int ret,result;
 	char client_name[ADDRSTRLEN];
 	sigset_t set;
 
+	printf("udp_accept\n");
+	sp= (struct sock_packet*)arg;
+	p = &(sp->p);
 	client_port = sp->port;
 	strcpy(client_name,
 	       sp->hostname);
@@ -347,6 +295,7 @@ void* udp_accept(void *arg)
                 pthread_exit(NULL);
         }
 
+	printf("SYN reeived\n");
 	/* Create retransmission timer */
 	sigemptyset(&set);
 	sigaddset(&set,SIGUSR1);
@@ -382,30 +331,32 @@ void* udp_accept(void *arg)
 			     client_port);
 
 	/* Send the packet */
-	send_packet(handshake_msg,server_sockfd,&client_addr);
+	send_packet(handshake_msg,server_sockfd,(struct sockaddr*)&client_addr);
 
 	/* Start retransmission timer */
 	start_rto_timer(&rto_timer,rto);
 
 	/* Wait for an ACK from the peer */
 	if ((recv_from(server_sockfd,
-		       resp,
+		       &resp,
 		       MAX_PACKET_SIZE,
 		       client_name,
-		       &client_port) < 0) || (get_flags(resp) != ACK_FLAG)) {
+		       &client_port) < 0) || (get_flags(&resp) != ACK_FLAG)) {
 		printf("Unexpected packet.exiting\n");
 		exit(1);	
 	}
 
+	
 	/* Free structures used during handshake */
+	printf("Handshake complete\n");
 	timer_delete(rto_timer);
 	free(handshake_msg);
 	handshake_msg = NULL;
-	free(p);
 	free(sp);
 
 	/* Now, send the file */
 	send_file();
+	return NULL;
 }
 
 void udp_listen(int sockfd)
@@ -413,6 +364,7 @@ void udp_listen(int sockfd)
         int ret;
         struct sock_packet *sp;
         pthread_t *tid;
+	static int flag = 0;
 
         printf("listening...\n");
         fflush(stdout);
@@ -426,6 +378,10 @@ void udp_listen(int sockfd)
 				    MAX_PACKET_SIZE,
 				    sp->hostname,
 				    &(sp->port)))>0) {
+			if (flag == 0) {
+				flag = 1;
+				continue;
+			}
                         dll_add_to_tail(&tid_dll,tid);
                         pthread_create(tid, NULL, &udp_accept,(void*)sp);
                 }
@@ -448,7 +404,7 @@ void main_handler(int sig,
 
 	for (i=0;i<size;i++) {
 		tid = dll_at(&tid_dll,i);
-		pthread_kill(tid,SIGUSR2);
+		pthread_kill(*tid,SIGUSR2);
 	}
 }
 
@@ -463,6 +419,8 @@ int main(int argc,char **argv)
 
 	strcpy(filename,
 	       argv[2]);
+
+	dll_init(&tid_dll);
 
 	sa.sa_flags = SA_SIGINFO;
 	sa.sa_sigaction = main_handler;

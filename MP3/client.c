@@ -9,8 +9,10 @@
 #include<arpa/inet.h>
 #include<pthread.h>
 
-#include "header.h"
+#include "helper.h"
 #include "dll.h"
+
+#include "signal.h"
 
 #define LOCALPORT 3355
 
@@ -63,7 +65,7 @@ int send_ack()
 		    flags,
 		    0);
 
-	send_packet(resp, client_sockfd, &server_addr);
+	send_packet(&resp, client_sockfd, (struct sockaddr*)&server_addr);
 	return ret;
 }
 
@@ -92,11 +94,10 @@ void add_to_packet_list(struct packet *curr)
 
 void get_file(char *filename)
 {
-
 	struct packet tmp;
 	int ret;
 	struct sockaddr_in *their_addr;
-	int their_len;
+        socklen_t their_len;
 
 	fp = fopen(filename,"w+");
 
@@ -112,14 +113,21 @@ void get_file(char *filename)
 			      &tmp,
 			      sizeof(tmp),
 			      0,
-			      (struct sockaddr*)&their_addr,
-			      &their_len)) > 0) {
+			      NULL,
+			      NULL)) > 0) {
 		struct packet *new;
+		char str[100];
 
+		show_header(&tmp);
 		new = malloc(sizeof(*new));
 		*new = tmp;
-		printf("seq no:%d\n",tmp.hdr.seq_no);
 
+		printf("ret:%d\n",ret);
+		memcpy(str,
+		       new->data,
+		       84);
+		str[85]='\0';
+		printf("str:%s\n",str);
 		add_to_packet_list(new);
 
 		if (send_ack() == 1) {
@@ -132,9 +140,9 @@ void get_file(char *filename)
 	fclose(fp);
 }
 
-int udp_connect(int sockfd, char *server_name,unsigned short server_port)
+int udp_connect(int sockfd, char *server_name)
 {
-        int ret,result;
+        int ret;
         unsigned short dst_port=server_port;
 	struct packet resp;
 
@@ -160,28 +168,31 @@ int udp_connect(int sockfd, char *server_name,unsigned short server_port)
 
 	/* Send the message to server */
 	send_packet(handshake_msg,
-		    &server_addr);
+		    client_sockfd,
+		    (struct sockaddr*)&server_addr);
 
 	/* Start retransmission timer */
-	start_rto_timer(&rto_timer,2);
+	start_rto_timer(&rto_timer,10);
 
 	/* Wait for an SYN-ACK from server */
-	ret=recv_from(sockfd,
+	while ((ret=recv_from(sockfd,
 		      &resp,
 		      MAX_PACKET_SIZE,
 		      server_name,
-		      &dst_port);
+			      &dst_port)) <0);
 
 	/* Delete the timer */
 	timer_delete(rto_timer);
 
 	server_port = dst_port;
 
+	printf("server_port:%d\n",server_port);
+	show_header(&resp);
 	/* Received SYN-ACK. Send ACK */
 	if((ret>0) && (get_flags(&resp)==(SYN_FLAG+ACK_FLAG))) {
 		printf("good! sending ACK...\n");
 		fflush(stdout);
-		make_header(&handshake_msg,
+		make_header(handshake_msg,
 			    src_port,
 			    dst_port,
 			    0,
@@ -193,12 +204,14 @@ int udp_connect(int sockfd, char *server_name,unsigned short server_port)
 				     dst_port);
 
 		send_packet(handshake_msg,
-			    &server_addr);
+			    client_sockfd,
+			    (struct sockaddr*)&server_addr);
 	} else {
 		printf("Problem with SYN-ACK\n");
 		exit(1);
 	}
 	free(handshake_msg);
+	return ret;
 }
 
 void main_handler(int sig,
@@ -208,8 +221,8 @@ void main_handler(int sig,
 	printf("Main signal handler:%d %p %p\n",sig,si,uc);
 
 	if (handshake_msg) {
-		send_packet(handshake_msg, &server_addr);
-		start_rto_timer(&rto_timer,2);
+		send_packet(handshake_msg,  client_sockfd, (struct sockaddr*)&server_addr);
+		start_rto_timer(&rto_timer,10);
 	}
 }
 
@@ -238,7 +251,7 @@ int main(int argc,
 	client_sockfd = create_udp_socket(src_port);
 
 	/* Connect to peer */
-	udp_connect(client_sockfd,server_name,server_port);
+	udp_connect(client_sockfd,server_name);
 
 	/* Get file */
 	get_file(argv[3]);

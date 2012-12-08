@@ -4,13 +4,17 @@ LIBS = -lpthread -lrt
 
 all: server client
 
-server: server.c dll.o header.h
+server: server.c dll.o helper
 	@(echo "compiling $< ...")
 	@($(CC) $(FLAGS) $(LIBS) $^ -o $@)
 
-client: client.c dll.o header.h
+client: client.c dll.o helper
 	@(echo "compiling $< ...")
 	@($(CC) $(FLAGS) $(LIBS) $^ -o $@)
+
+helper: helper.c helper.h
+	@(echo "compiling $< ...")
+	@($(CC) -c $(FLAGS) $< -o $@ $(LIBS))
 
 dll.o: dll.c dll.h
 	@(echo "compiling $< ...")
