@@ -11,13 +11,12 @@
 
 #include "helper.h"
 #include "dll.h"
-
-#include "signal.h"
+#include<signal.h>
 
 #define LOCALPORT 3355
 
 static dll_t packet_list;
-static unsigned int expected_seq = 0;
+static unsigned int expected_seq = 1;
 
 static FILE *fp=NULL;
 static unsigned short src_port;
@@ -39,14 +38,14 @@ int send_ack()
 	tmp = dll_at(&packet_list,0);
 
 	while (tmp && (tmp->hdr.seq_no == expected_seq)) {
-		expected_seq += tmp->hdr.length;
+		expected_seq += tmp->hdr.length + sizeof(tmp->hdr);
 		fwrite(tmp->data,
 		       tmp->hdr.length,
 		       1,
 		       fp);
 
 		if (tmp->hdr.flags & FIN_FLAG) {
-			printf("FIN received\n");
+			printf_log("FIN received\n");
 			ret = 1;
 		}
 		dll_remove_from_head(&packet_list);
@@ -102,7 +101,7 @@ void get_file(char *filename)
 	fp = fopen(filename,"w+");
 
 	if (fp == NULL) {
-		printf("Error opening file\n");
+		printf_log("Error opening file\n");
 		exit(1);
 	}
 
@@ -122,12 +121,12 @@ void get_file(char *filename)
 		new = malloc(sizeof(*new));
 		*new = tmp;
 
-		printf("ret:%d\n",ret);
+		printf_log("ret:%d\n",ret);
 		memcpy(str,
 		       new->data,
 		       84);
 		str[85]='\0';
-		printf("str:%s\n",str);
+		printf_log("str:%s\n",str);
 		add_to_packet_list(new);
 
 		if (send_ack() == 1) {
@@ -186,17 +185,17 @@ int udp_connect(int sockfd, char *server_name)
 
 	server_port = dst_port;
 
-	printf("server_port:%d\n",server_port);
+	printf_log("server_port:%d\n",server_port);
 	show_header(&resp);
 	/* Received SYN-ACK. Send ACK */
 	if((ret>0) && (get_flags(&resp)==(SYN_FLAG+ACK_FLAG))) {
-		printf("good! sending ACK...\n");
+		printf_log("good! sending ACK...\n");
 		fflush(stdout);
 		make_header(handshake_msg,
 			    src_port,
 			    dst_port,
-			    0,
-			    0,
+			    1,
+			    1,
 			    ACK_FLAG,
 			    0);
 		prepare_for_udp_send(&server_addr,
@@ -207,7 +206,7 @@ int udp_connect(int sockfd, char *server_name)
 			    client_sockfd,
 			    (struct sockaddr*)&server_addr);
 	} else {
-		printf("Problem with SYN-ACK\n");
+		printf_log("Problem with SYN-ACK\n");
 		exit(1);
 	}
 	free(handshake_msg);
@@ -218,7 +217,13 @@ void main_handler(int sig,
                   siginfo_t *si,
                   void *uc)
 {
-	printf("Main signal handler:%d %p %p\n",sig,si,uc);
+#ifdef LOG
+	printf_log("Main signal handler:%d %p %p\n",sig,si,uc);
+#else
+	sig = 0;
+	si = NULL;
+	uc = NULL;
+#endif
 
 	if (handshake_msg) {
 		send_packet(handshake_msg,  client_sockfd, (struct sockaddr*)&server_addr);
@@ -237,6 +242,7 @@ int main(int argc,
 		exit(1);
         }
 
+	mp3_init();
         strcpy(server_name,argv[1]);
 	server_port=atoi(argv[2]);
         src_port=LOCALPORT;

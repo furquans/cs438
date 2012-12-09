@@ -71,11 +71,17 @@ int create_udp_socket(unsigned short port)
         }
         return sockfd;
 }
+
 void show_header(struct packet *p)
 {
-	printf("(%u,%u,%d,%d,%u,%u)\n",(p->hdr).src_port,(p->hdr).dst_port,(p->hdr).seq_no,(p->hdr).ack_no,(p->hdr).flags,(p->hdr).length);
+#ifdef LOG
+	printf_log("(%u,%u,%d,%d,%u,%u)\n",(p->hdr).src_port,(p->hdr).dst_port,(p->hdr).seq_no,(p->hdr).ack_no,(p->hdr).flags,(p->hdr).length);
         fflush(stdout);
+#else
+	p = NULL;
+#endif
 }
+
 
 unsigned short get_port(struct sockaddr *sa)
 {
@@ -86,7 +92,7 @@ unsigned short get_port(struct sockaddr *sa)
 
 int send_to(int sockfd, void *msg, int len, char *dest, unsigned short dst_port)
 {
-	printf("header sent: ");
+	printf_log("header sent: ");
 	show_header((struct packet*)msg);
         struct sockaddr_in to;
         struct hostent *he;
@@ -101,9 +107,9 @@ int send_to(int sockfd, void *msg, int len, char *dest, unsigned short dst_port)
         to.sin_addr = *((struct in_addr *)he->h_addr);
         memset(to.sin_zero, '\0', sizeof(to.sin_zero));
 
-        if(sendto(sockfd,msg,len,0,(struct sockaddr*)&to,sizeof(to))<len) {
-                perror("sendto");
-                exit(1);
+        if(mp3_sendto(sockfd,msg,len,0,(struct sockaddr*)&to,sizeof(to))<len) {
+                /* perror("sendto"); */
+                /* exit(1); */
         }
         return len;
 }
@@ -115,7 +121,7 @@ int recv_from(int sockfd, void *buf, int len, char *src, unsigned short *src_por
 	socklen_t from_len=sizeof from;
 	if((ret=recvfrom(sockfd,buf,len,0,(struct sockaddr*)&from,&from_len))<0) 
 		return -1;
-	printf("header received: ");
+	printf_log("header received: ");
 	show_header((struct packet*)buf);
 	inet_ntop(AF_INET,&(((struct sockaddr_in*)&from)->sin_addr),src,INET_ADDRSTRLEN);
 	*src_port=get_port((struct sockaddr*)&from);
@@ -130,7 +136,7 @@ void prepare_for_udp_send(struct sockaddr_in *their_addr,
 	struct hostent *he;
 
 	if ((he=gethostbyname(name)) == NULL) {
-		printf("gethostname failed\n");
+		printf_log("gethostname failed\n");
 		exit(1);
 	}
 
@@ -146,16 +152,14 @@ void send_packet(struct packet *p,
 {
 	int count = sizeof(p->hdr) + p->hdr.length;
 
-	printf("ecount:%d\n",count);
-	show_header(p);
-	if (sendto(mysockfd,
-		   p,
-		   count,
-		   0,
-		   their_addr,
-		   sizeof(*their_addr)) < count) {
-		printf("send to failed\n");
-		exit(1);
+	if (mp3_sendto(mysockfd,
+		       p,
+		       count,
+		       0,
+		       their_addr,
+		       sizeof(*their_addr)) < count) {
+		/* printf_log("send to failed\n"); */
+		/* exit(1); */
 	}
 }
 
@@ -182,5 +186,4 @@ void start_rto_timer(timer_t *pkt_timer,
 		perror("timer_settime");
 		exit(1);
 	}
-	printf("started rto timer\n");
 }

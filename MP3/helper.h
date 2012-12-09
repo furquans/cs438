@@ -18,6 +18,15 @@ typedef struct _header{
 	unsigned short length;
 }header;
 
+#define printf_output printf
+
+/* #define LOG */
+#ifdef LOG
+#define printf_log printf
+#else
+#define printf_log(...)
+#endif
+
 #define MAX_PACKET_SIZE 100
 #define HEADER_SIZE sizeof(header)
 #define MAX_DATA_SIZE MAX_PACKET_SIZE-HEADER_SIZE
@@ -51,4 +60,8 @@ void start_rto_timer(timer_t *,
 void prepare_for_udp_send(struct sockaddr_in *,
 			  char *,
 			  int);
+void mp3_init(void);
+ssize_t mp3_sendto(int sockfd, void *buff, size_t nbytes, int flags,
+		   const struct sockaddr *to, socklen_t addrlen);
+
 #endif
